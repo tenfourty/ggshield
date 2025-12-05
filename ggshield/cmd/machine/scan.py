@@ -124,7 +124,18 @@ class ScanProgressReporter:
         spinner = SPINNER_CHARS[self.spinner_index % len(SPINNER_CHARS)]
         self.spinner_index += 1
 
-        msg = f"\r  {spinner} {phase}... {files_visited:,} files ({elapsed:.1f}s)"
+        # Handle unified phase format "Scanning filesystem | .env: N | keys: N"
+        if " | " in phase:
+            parts = phase.split(" | ")
+            base_phase = parts[0]
+            counts = " | ".join(parts[1:])
+            msg = (
+                f"\r  {spinner} {base_phase}... "
+                f"{files_visited:,} files ({elapsed:.1f}s) | {counts}"
+            )
+        else:
+            msg = f"\r  {spinner} {phase}... {files_visited:,} files ({elapsed:.1f}s)"
+
         self._current_spinner_line = msg
         sys.stderr.write(msg)
         sys.stderr.flush()

@@ -6,14 +6,26 @@ import time
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import Callable, Iterator, Optional, Pattern, Set
+from typing import Callable, Dict, Iterator, Optional, Pattern, Set
 
-from ggshield.verticals.machine.sources import GatheredSecret, SourceType
-from ggshield.verticals.machine.sources.env_files import EnvFileSource
+from ggshield.utils.files import is_path_excluded
+from ggshield.verticals.machine.sources import (
+    GatheredSecret,
+    SecretMetadata,
+    SourceType,
+)
 from ggshield.verticals.machine.sources.environment import EnvironmentSecretSource
+from ggshield.verticals.machine.sources.file_matcher import (
+    EnvFileMatcher,
+    PrivateKeyMatcher,
+    _looks_like_key_content,
+)
 from ggshield.verticals.machine.sources.github_token import GitHubTokenSource
 from ggshield.verticals.machine.sources.npmrc import NpmrcSource
-from ggshield.verticals.machine.sources.private_keys import PrivateKeySource
+from ggshield.verticals.machine.sources.unified_walker import (
+    UnifiedFileSystemWalker,
+    WalkerConfig,
+)
 
 
 # Type alias for progress callback: (phase, files_visited, elapsed_seconds) -> None
@@ -109,14 +121,9 @@ class MachineSecretGatherer:
         yield from self._gather_from_github_cli()
         yield from self._gather_from_npmrc(home)
 
-        # Filesystem sources (respects timeout)
+        # Filesystem sources (single unified traversal, respects timeout)
         if not self._is_timed_out():
-            self._report_progress_force("Scanning .env files")
-            yield from self._gather_from_env_files(home)
-
-        if not self._is_timed_out():
-            self._report_progress_force("Scanning for private keys")
-            yield from self._gather_from_private_keys(home)
+            yield from self._gather_from_filesystem(home)
 
         self._stats.elapsed_seconds = time.time() - self._start_time
 
@@ -187,80 +194,186 @@ class MachineSecretGatherer:
             )
         )
 
-    def _gather_from_env_files(self, home: Path) -> Iterator[GatheredSecret]:
-        """Gather secrets from .env* files."""
+    def _gather_from_filesystem(self, home: Path) -> Iterator[GatheredSecret]:
+        """
+        Gather secrets from filesystem using single unified traversal.
 
-        def on_source_progress(files_visited: int) -> None:
+        Scans well-known key locations first (fast-path), then performs
+        a single os.walk() traversal for all file types.
+        """
+        # Track private keys already seen in well-known locations
+        seen_key_paths: Set[Path] = set()
+
+        # Fast-path: scan well-known private key locations first
+        # This ensures we find important keys even if timeout hits during full scan
+        yield from self._scan_well_known_key_locations(home, seen_key_paths)
+
+        if self._is_timed_out():
+            self._finalize_filesystem_stats(0, {}, {})
+            return
+
+        # Create matchers for unified walk
+        env_matcher = EnvFileMatcher(min_chars=self.config.min_chars)
+        key_matcher = PrivateKeyMatcher(seen_paths=seen_key_paths)
+
+        def on_walker_progress(
+            files_visited: int, matches_by_type: Dict[SourceType, int]
+        ) -> None:
             self._stats.total_files_visited = files_visited
-            self._report_progress_force("Scanning .env files")
+            self._report_progress_with_counts(files_visited, matches_by_type)
 
-        source = EnvFileSource(
+        walker_config = WalkerConfig(
             home_dir=home,
-            timeout=self.config.timeout,
-            min_chars=self.config.min_chars,
+            matchers=[env_matcher, key_matcher],
             is_timed_out=self._is_timed_out,
-            on_progress=on_source_progress,
             exclusion_regexes=self.config.exclusion_regexes,
+            on_progress=on_walker_progress,
         )
 
-        for secret in source.gather():
-            # Update stats during iteration
-            self._stats.total_files_visited = source.files_visited
-            yield secret
+        walker = UnifiedFileSystemWalker(walker_config)
 
-        self._stats.env_files = source.files_found
-        self._stats.env_secrets = source.secrets_found
-        self._stats.total_files_visited = source.files_visited
+        # Single filesystem traversal
+        self._report_progress_force("Scanning filesystem")
+        for secret in walker.walk():
+            self._stats.total_files_visited = walker.stats.files_visited
+            yield secret
 
         if self._is_timed_out():
             self._stats.timed_out = True
 
+        # Finalize stats from walker
+        self._finalize_filesystem_stats(
+            walker.stats.files_visited,
+            walker.stats.matches_by_type,
+            walker.stats.secrets_by_type,
+        )
+
+    def _scan_well_known_key_locations(
+        self, home: Path, seen_paths: Set[Path]
+    ) -> Iterator[GatheredSecret]:
+        """
+        Scan well-known locations for private keys (fast-path).
+
+        This is done before the full filesystem scan to ensure important
+        keys are found even if timeout hits during the full walk.
+        """
+        well_known_dirs = [
+            home / ".ssh",
+            home / ".gnupg",
+            home / ".ssl",
+            home / ".certs",
+        ]
+
+        # Maximum file size for private keys (10KB)
+        max_key_size = 10 * 1024
+
+        for key_dir in well_known_dirs:
+            if not key_dir.exists() or not key_dir.is_dir():
+                continue
+
+            try:
+                for fpath in key_dir.iterdir():
+                    if self._is_timed_out():
+                        return
+
+                    if not fpath.is_file():
+                        continue
+
+                    # Check exclusion patterns
+                    if is_path_excluded(fpath, self.config.exclusion_regexes):
+                        continue
+
+                    # Check file size
+                    try:
+                        stat = fpath.stat()
+                        if stat.st_size > max_key_size:
+                            continue
+                    except (OSError, PermissionError):
+                        continue
+
+                    # Read and validate content
+                    try:
+                        content = fpath.read_text(encoding="utf-8", errors="ignore")
+                    except (OSError, PermissionError):
+                        continue
+
+                    if not content.strip():
+                        continue
+
+                    if not _looks_like_key_content(content):
+                        continue
+
+                    # Mark as seen to avoid duplicates in full scan
+                    seen_paths.add(fpath)
+
+                    self._stats.private_key_files += 1
+                    self._stats.private_key_secrets += 1
+
+                    yield GatheredSecret(
+                        value=content.strip(),
+                        metadata=SecretMetadata(
+                            source_type=SourceType.PRIVATE_KEY,
+                            source_path=str(fpath),
+                            secret_name=fpath.name,
+                        ),
+                    )
+            except (OSError, PermissionError):
+                continue
+
+    def _finalize_filesystem_stats(
+        self,
+        files_visited: int,
+        matches_by_type: Dict[SourceType, int],
+        secrets_by_type: Dict[SourceType, int],
+    ) -> None:
+        """Update stats and report completion for filesystem sources."""
+        self._stats.total_files_visited = files_visited
+
+        # Env files stats (from walker only)
+        env_files = matches_by_type.get(SourceType.ENV_FILE, 0)
+        env_secrets = secrets_by_type.get(SourceType.ENV_FILE, 0)
+        self._stats.env_files = env_files
+        self._stats.env_secrets = env_secrets
+
+        # Private key stats (well-known + walker)
+        key_files_from_walker = matches_by_type.get(SourceType.PRIVATE_KEY, 0)
+        key_secrets_from_walker = secrets_by_type.get(SourceType.PRIVATE_KEY, 0)
+        self._stats.private_key_files += key_files_from_walker
+        self._stats.private_key_secrets += key_secrets_from_walker
+
+        # Report env files completion
         self._report_source_complete(
             SourceResult(
                 source_type=SourceType.ENV_FILE,
                 status=SourceStatus.COMPLETED,
-                secrets_found=source.secrets_found,
-                files_scanned=source.files_found,
+                secrets_found=env_secrets,
+                files_scanned=env_files,
             )
         )
 
-    def _gather_from_private_keys(self, home: Path) -> Iterator[GatheredSecret]:
-        """Gather secrets from private key files."""
-        # Track the baseline from env files scan
-        baseline_files = self._stats.total_files_visited
-
-        def on_source_progress(files_visited: int) -> None:
-            self._stats.total_files_visited = baseline_files + files_visited
-            self._report_progress_force("Scanning for private keys")
-
-        source = PrivateKeySource(
-            home_dir=home,
-            timeout=self.config.timeout,
-            is_timed_out=self._is_timed_out,
-            on_progress=on_source_progress,
-            exclusion_regexes=self.config.exclusion_regexes,
-        )
-
-        for secret in source.gather():
-            # Update stats during iteration
-            self._stats.total_files_visited = baseline_files + source.files_visited
-            yield secret
-
-        self._stats.private_key_files = source.files_found
-        self._stats.private_key_secrets = source.secrets_found
-        self._stats.total_files_visited = baseline_files + source.files_visited
-
-        if self._is_timed_out():
-            self._stats.timed_out = True
-
+        # Report private keys completion
         self._report_source_complete(
             SourceResult(
                 source_type=SourceType.PRIVATE_KEY,
                 status=SourceStatus.COMPLETED,
-                secrets_found=source.secrets_found,
-                files_scanned=source.files_found,
+                secrets_found=self._stats.private_key_secrets,
+                files_scanned=self._stats.private_key_files,
             )
         )
+
+    def _report_progress_with_counts(
+        self, files_visited: int, matches_by_type: Dict[SourceType, int]
+    ) -> None:
+        """Report progress with per-type match counts."""
+        if self.config.on_progress is None:
+            return
+
+        elapsed = time.time() - (self._start_time or time.time())
+        # Pass phase with counts embedded for display
+        env_count = matches_by_type.get(SourceType.ENV_FILE, 0)
+        key_count = matches_by_type.get(SourceType.PRIVATE_KEY, 0)
+        phase = f"Scanning filesystem | .env: {env_count} | keys: {key_count}"
+        self.config.on_progress(phase, files_visited, elapsed)
 
     def _is_timed_out(self) -> bool:
         """Check if the gathering has exceeded the timeout."""

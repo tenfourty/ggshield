@@ -1,12 +1,13 @@
 """
-Tests for private key file secret source.
+Tests for private key file matcher.
 """
 
 from pathlib import Path
+from typing import Set
 
 from ggshield.core.filter import init_exclusion_regexes
 from ggshield.verticals.machine.sources import SourceType
-from ggshield.verticals.machine.sources.private_keys import PrivateKeySource
+from ggshield.verticals.machine.sources.file_matcher import PrivateKeyMatcher
 
 
 # Sample RSA private key (not a real key, just for testing format detection)
@@ -21,250 +22,214 @@ zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz
 -----END OPENSSH PRIVATE KEY-----"""
 
 
-class TestPrivateKeySource:
-    """Tests for PrivateKeySource."""
+class TestPrivateKeyMatcher:
+    """Tests for PrivateKeyMatcher."""
 
     def test_source_type(self):
         """
-        GIVEN a PrivateKeySource
+        GIVEN a PrivateKeyMatcher
         WHEN accessing source_type
         THEN it returns PRIVATE_KEY
         """
-        source = PrivateKeySource()
-        assert source.source_type == SourceType.PRIVATE_KEY
+        matcher = PrivateKeyMatcher()
+        assert matcher.source_type == SourceType.PRIVATE_KEY
 
-    def test_gather_id_rsa(self, tmp_path: Path):
+    def test_matches_filename_id_rsa(self):
         """
-        GIVEN an id_rsa file in .ssh directory
-        WHEN gathering secrets
+        GIVEN a PrivateKeyMatcher
+        WHEN checking id_rsa filename
+        THEN it matches
+        """
+        matcher = PrivateKeyMatcher()
+        assert matcher.matches_filename("id_rsa") is True
+
+    def test_matches_filename_id_ed25519(self):
+        """
+        GIVEN a PrivateKeyMatcher
+        WHEN checking id_ed25519 filename
+        THEN it matches
+        """
+        matcher = PrivateKeyMatcher()
+        assert matcher.matches_filename("id_ed25519") is True
+
+    def test_matches_filename_pem_extension(self):
+        """
+        GIVEN a PrivateKeyMatcher
+        WHEN checking .pem file
+        THEN it matches
+        """
+        matcher = PrivateKeyMatcher()
+        assert matcher.matches_filename("server.pem") is True
+
+    def test_matches_filename_key_extension(self):
+        """
+        GIVEN a PrivateKeyMatcher
+        WHEN checking .key file
+        THEN it matches
+        """
+        matcher = PrivateKeyMatcher()
+        assert matcher.matches_filename("private.key") is True
+
+    def test_matches_filename_private_key_pattern(self):
+        """
+        GIVEN a PrivateKeyMatcher
+        WHEN checking file with 'private' and 'key' in name
+        THEN it matches
+        """
+        matcher = PrivateKeyMatcher()
+        assert matcher.matches_filename("my_private_key.txt") is True
+        assert matcher.matches_filename("PRIVATE_KEY_FILE") is True
+
+    def test_matches_filename_non_key_file(self):
+        """
+        GIVEN a PrivateKeyMatcher
+        WHEN checking regular file
+        THEN it does not match
+        """
+        matcher = PrivateKeyMatcher()
+        assert matcher.matches_filename("readme.txt") is False
+        assert matcher.matches_filename("config.json") is False
+
+    def test_extract_secrets_id_rsa(self, tmp_path: Path):
+        """
+        GIVEN an id_rsa file with valid key content
+        WHEN extracting secrets
         THEN yields the key content
         """
         ssh_dir = tmp_path / ".ssh"
         ssh_dir.mkdir()
-        (ssh_dir / "id_rsa").write_text(SAMPLE_RSA_KEY)
+        key_file = ssh_dir / "id_rsa"
+        key_file.write_text(SAMPLE_RSA_KEY)
 
-        source = PrivateKeySource(home_dir=tmp_path)
-        secrets = list(source.gather())
+        matcher = PrivateKeyMatcher()
+        secrets = list(matcher.extract_secrets(key_file, set()))
 
         assert len(secrets) == 1
         assert secrets[0].metadata.source_type == SourceType.PRIVATE_KEY
         assert "id_rsa" in secrets[0].metadata.secret_name
         assert "BEGIN RSA PRIVATE KEY" in secrets[0].value
 
-    def test_gather_id_ed25519(self, tmp_path: Path):
+    def test_extract_secrets_openssh_key(self, tmp_path: Path):
         """
-        GIVEN an id_ed25519 file in .ssh directory
-        WHEN gathering secrets
+        GIVEN an OpenSSH private key file
+        WHEN extracting secrets
         THEN yields the key content
         """
         ssh_dir = tmp_path / ".ssh"
         ssh_dir.mkdir()
-        (ssh_dir / "id_ed25519").write_text(SAMPLE_OPENSSH_KEY)
+        key_file = ssh_dir / "id_ed25519"
+        key_file.write_text(SAMPLE_OPENSSH_KEY)
 
-        source = PrivateKeySource(home_dir=tmp_path)
-        secrets = list(source.gather())
+        matcher = PrivateKeyMatcher()
+        secrets = list(matcher.extract_secrets(key_file, set()))
 
         assert len(secrets) == 1
         assert "id_ed25519" in secrets[0].metadata.secret_name
 
-    def test_gather_pem_file(self, tmp_path: Path):
+    def test_extract_secrets_pem_file(self, tmp_path: Path):
         """
-        GIVEN a .pem file
-        WHEN gathering secrets
+        GIVEN a .pem file with valid key content
+        WHEN extracting secrets
         THEN yields the key content
         """
-        (tmp_path / "server.pem").write_text(SAMPLE_RSA_KEY)
+        key_file = tmp_path / "server.pem"
+        key_file.write_text(SAMPLE_RSA_KEY)
 
-        source = PrivateKeySource(home_dir=tmp_path)
-        secrets = list(source.gather())
+        matcher = PrivateKeyMatcher()
+        secrets = list(matcher.extract_secrets(key_file, set()))
 
         assert len(secrets) == 1
         assert secrets[0].metadata.secret_name == "server.pem"
 
-    def test_gather_key_file(self, tmp_path: Path):
-        """
-        GIVEN a .key file
-        WHEN gathering secrets
-        THEN yields the key content
-        """
-        (tmp_path / "private.key").write_text(SAMPLE_RSA_KEY)
-
-        source = PrivateKeySource(home_dir=tmp_path)
-        secrets = list(source.gather())
-
-        assert len(secrets) == 1
-        assert secrets[0].metadata.secret_name == "private.key"
-
-    def test_gather_multiple_keys(self, tmp_path: Path):
-        """
-        GIVEN multiple private key files
-        WHEN gathering secrets
-        THEN yields all of them
-        """
-        ssh_dir = tmp_path / ".ssh"
-        ssh_dir.mkdir()
-        (ssh_dir / "id_rsa").write_text(SAMPLE_RSA_KEY)
-        (ssh_dir / "id_ed25519").write_text(SAMPLE_OPENSSH_KEY)
-        (tmp_path / "ssl.pem").write_text(SAMPLE_RSA_KEY)
-
-        source = PrivateKeySource(home_dir=tmp_path)
-        secrets = list(source.gather())
-
-        assert len(secrets) == 3
-        names = {s.metadata.secret_name for s in secrets}
-        assert "id_rsa" in names
-        assert "id_ed25519" in names
-        assert "ssl.pem" in names
-
-    def test_gather_ignores_non_key_content(self, tmp_path: Path):
+    def test_extract_secrets_ignores_non_key_content(self, tmp_path: Path):
         """
         GIVEN a .pem file without key markers
-        WHEN gathering secrets
+        WHEN extracting secrets
         THEN ignores it
         """
-        (tmp_path / "not_a_key.pem").write_text("This is not a private key")
+        key_file = tmp_path / "not_a_key.pem"
+        key_file.write_text("This is not a private key")
 
-        source = PrivateKeySource(home_dir=tmp_path)
-        secrets = list(source.gather())
+        matcher = PrivateKeyMatcher()
+        secrets = list(matcher.extract_secrets(key_file, set()))
 
         assert len(secrets) == 0
 
-    def test_gather_ignores_empty_files(self, tmp_path: Path):
+    def test_extract_secrets_ignores_empty_files(self, tmp_path: Path):
         """
         GIVEN an empty key file
-        WHEN gathering secrets
+        WHEN extracting secrets
         THEN ignores it
         """
-        ssh_dir = tmp_path / ".ssh"
-        ssh_dir.mkdir()
-        (ssh_dir / "id_rsa").write_text("")
+        key_file = tmp_path / "id_rsa"
+        key_file.write_text("")
 
-        source = PrivateKeySource(home_dir=tmp_path)
-        secrets = list(source.gather())
+        matcher = PrivateKeyMatcher()
+        secrets = list(matcher.extract_secrets(key_file, set()))
 
         assert len(secrets) == 0
 
-    def test_gather_ignores_large_files(self, tmp_path: Path):
+    def test_extract_secrets_ignores_large_files(self, tmp_path: Path):
         """
-        GIVEN a .pem file larger than MAX_KEY_FILE_SIZE
-        WHEN gathering secrets
+        GIVEN a .pem file larger than MAX_KEY_FILE_SIZE (10KB)
+        WHEN extracting secrets
         THEN ignores it
         """
         # Create a file larger than 10KB
         large_content = SAMPLE_RSA_KEY + ("x" * 15000)
-        (tmp_path / "large.pem").write_text(large_content)
+        key_file = tmp_path / "large.pem"
+        key_file.write_text(large_content)
 
-        source = PrivateKeySource(home_dir=tmp_path)
-        secrets = list(source.gather())
-
-        assert len(secrets) == 0
-
-    def test_gather_respects_timeout(self, tmp_path: Path):
-        """
-        GIVEN a timeout callback that returns True
-        WHEN gathering secrets
-        THEN stops gathering
-        """
-        ssh_dir = tmp_path / ".ssh"
-        ssh_dir.mkdir()
-        (ssh_dir / "id_rsa").write_text(SAMPLE_RSA_KEY)
-
-        source = PrivateKeySource(home_dir=tmp_path, is_timed_out=lambda: True)
-        secrets = list(source.gather())
-
-        # May or may not find the key depending on when timeout is checked
-        # but should not hang or error
-        assert isinstance(secrets, list)
-
-    def test_gather_skips_hidden_dirs_except_allowed(self, tmp_path: Path):
-        """
-        GIVEN key files in .ssh (allowed) and .cache (not allowed)
-        WHEN gathering secrets
-        THEN only finds keys in allowed directories
-        """
-        ssh_dir = tmp_path / ".ssh"
-        ssh_dir.mkdir()
-        (ssh_dir / "id_rsa").write_text(SAMPLE_RSA_KEY)
-
-        cache_dir = tmp_path / ".cache" / "keys"
-        cache_dir.mkdir(parents=True)
-        (cache_dir / "cached.pem").write_text(SAMPLE_RSA_KEY)
-
-        source = PrivateKeySource(home_dir=tmp_path)
-        secrets = list(source.gather())
-
-        names = {s.metadata.secret_name for s in secrets}
-        assert "id_rsa" in names
-        assert "cached.pem" not in names
-
-    def test_gather_no_key_files(self, tmp_path: Path):
-        """
-        GIVEN a directory with no private key files
-        WHEN gathering secrets
-        THEN yields nothing
-        """
-        (tmp_path / "readme.txt").write_text("Just a readme")
-
-        source = PrivateKeySource(home_dir=tmp_path)
-        secrets = list(source.gather())
+        matcher = PrivateKeyMatcher()
+        secrets = list(matcher.extract_secrets(key_file, set()))
 
         assert len(secrets) == 0
 
-    def test_gather_respects_exclusion_patterns(self, tmp_path: Path):
+    def test_extract_secrets_skips_seen_paths(self, tmp_path: Path):
         """
-        GIVEN private key files in various directories
-        WHEN gathering with exclusion patterns from config
-        THEN skips files matching the patterns
+        GIVEN a key file that's already in seen_paths
+        WHEN extracting secrets
+        THEN skips it
         """
-        # Create key files in different locations
-        ssh_dir = tmp_path / ".ssh"
-        ssh_dir.mkdir()
-        (ssh_dir / "id_rsa").write_text(SAMPLE_RSA_KEY)
+        key_file = tmp_path / "id_rsa"
+        key_file.write_text(SAMPLE_RSA_KEY)
 
+        seen_paths: Set[Path] = {key_file}
+        matcher = PrivateKeyMatcher(seen_paths=seen_paths)
+        secrets = list(matcher.extract_secrets(key_file, set()))
+
+        assert len(secrets) == 0
+
+    def test_extract_secrets_respects_exclusion_patterns(self, tmp_path: Path):
+        """
+        GIVEN a key file matching exclusion pattern
+        WHEN extracting secrets
+        THEN skips it
+        """
         tests_dir = tmp_path / "tests" / "fixtures"
         tests_dir.mkdir(parents=True)
-        (tests_dir / "test.pem").write_text(SAMPLE_RSA_KEY)
+        key_file = tests_dir / "test.pem"
+        key_file.write_text(SAMPLE_RSA_KEY)
 
-        project_dir = tmp_path / "project"
-        project_dir.mkdir()
-        (project_dir / "server.key").write_text(SAMPLE_RSA_KEY)
-
-        # Create exclusion patterns (same format as .gitguardian.yaml ignored_paths)
-        # Note: patterns end with /**/* to match files inside directories
         exclusion_regexes = init_exclusion_regexes(["**/tests/**/*"])
 
-        source = PrivateKeySource(
-            home_dir=tmp_path, exclusion_regexes=exclusion_regexes
-        )
-        secrets = list(source.gather())
+        matcher = PrivateKeyMatcher()
+        secrets = list(matcher.extract_secrets(key_file, exclusion_regexes))
 
-        names = {s.metadata.secret_name for s in secrets}
-        # Should find .ssh and project keys
-        assert "id_rsa" in names
-        assert "server.key" in names
-        # Should NOT find keys in excluded paths
-        assert "test.pem" not in names
+        assert len(secrets) == 0
 
-    def test_gather_respects_exclusion_in_well_known_locations(self, tmp_path: Path):
+    def test_allowed_dot_directories(self):
         """
-        GIVEN private key files in .ssh (well-known location)
-        WHEN gathering with exclusion pattern for .ssh
-        THEN skips even well-known locations if excluded
+        GIVEN a PrivateKeyMatcher
+        WHEN accessing allowed_dot_directories
+        THEN it returns expected directories
         """
-        ssh_dir = tmp_path / ".ssh"
-        ssh_dir.mkdir()
-        (ssh_dir / "id_rsa").write_text(SAMPLE_RSA_KEY)
+        matcher = PrivateKeyMatcher()
+        allowed = matcher.allowed_dot_directories
 
-        (tmp_path / "other.pem").write_text(SAMPLE_RSA_KEY)
-
-        # Exclude .ssh directory (pattern ends with /**/* to match files)
-        exclusion_regexes = init_exclusion_regexes(["**/.ssh/**/*"])
-
-        source = PrivateKeySource(
-            home_dir=tmp_path, exclusion_regexes=exclusion_regexes
-        )
-        secrets = list(source.gather())
-
-        names = {s.metadata.secret_name for s in secrets}
-        assert "other.pem" in names
-        assert "id_rsa" not in names
+        assert ".ssh" in allowed
+        assert ".gnupg" in allowed
+        assert ".ssl" in allowed
+        assert ".certs" in allowed
+        assert ".aws" in allowed
+        assert ".config" in allowed
