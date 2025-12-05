@@ -15,6 +15,7 @@ from ggshield.cmd.config import config_group
 from ggshield.cmd.hmsl import hmsl_group
 from ggshield.cmd.honeytoken import honeytoken_group
 from ggshield.cmd.install import install_cmd
+from ggshield.cmd.machine import machine_group
 from ggshield.cmd.quota import quota_cmd
 from ggshield.cmd.secret import secret_group
 from ggshield.cmd.secret.scan import scan_group
@@ -66,6 +67,7 @@ def exit_code(ctx: click.Context, exit_code: int, **kwargs: Any) -> int:
         "api-status": status_cmd,
         "honeytoken": honeytoken_group,
         "hmsl": hmsl_group,
+        "machine": machine_group,
     },
 )
 @click.option(
