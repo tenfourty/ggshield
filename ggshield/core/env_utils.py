@@ -14,6 +14,7 @@ TRACKED_ENV_VARS = {
     "GITGUARDIAN_INSTANCE",
     "GITGUARDIAN_API_URL",
     "GITGUARDIAN_API_KEY",
+    "GITGUARDIAN_NHI_API_KEY",
 }
 
 logger = logging.getLogger(__name__)

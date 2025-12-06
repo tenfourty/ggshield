@@ -329,3 +329,27 @@ class TestConfig:
         with pytest.raises(UsageError):
             config = Config()
             config.instance_name
+
+    def test_nhi_api_key_from_env_var(self, monkeypatch):
+        """
+        GIVEN GITGUARDIAN_NHI_API_KEY environment variable is set
+        WHEN reading config.nhi_api_key
+        THEN it returns the value from the env var
+        """
+        monkeypatch.setenv("GITGUARDIAN_NHI_API_KEY", "nhi-service-account-key")
+        monkeypatch.setenv("GITGUARDIAN_API_KEY", "regular-api-key")
+
+        config = Config()
+        assert config.nhi_api_key == "nhi-service-account-key"
+
+    def test_nhi_api_key_falls_back_to_api_key(self, monkeypatch):
+        """
+        GIVEN GITGUARDIAN_NHI_API_KEY is not set but GITGUARDIAN_API_KEY is
+        WHEN reading config.nhi_api_key
+        THEN it returns the regular API key
+        """
+        monkeypatch.delenv("GITGUARDIAN_NHI_API_KEY", raising=False)
+        monkeypatch.setenv("GITGUARDIAN_API_KEY", "regular-api-key")
+
+        config = Config()
+        assert config.nhi_api_key == "regular-api-key"
