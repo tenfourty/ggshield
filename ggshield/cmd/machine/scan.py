@@ -2,11 +2,18 @@
 Machine scan command - scans local machine for secrets.
 """
 
+from __future__ import annotations
+
 import logging
 import sys
-from typing import Any, List, Optional, Tuple
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, List, Optional, Tuple
 
 import click
+
+
+if TYPE_CHECKING:
+    from ggshield.verticals.machine.analyzer import AnalysisResult
 
 from ggshield.cmd.utils.common_options import (
     add_common_options,
@@ -24,6 +31,7 @@ from ggshield.verticals.hmsl.collection import (
     prepare,
 )
 from ggshield.verticals.machine.output import (
+    display_analyzed_results,
     display_scan_results,
 )
 from ggshield.verticals.machine.secret_gatherer import (
@@ -161,10 +169,23 @@ class ScanProgressReporter:
 @text_json_format_option
 @json_option
 @click.option(
+    "--analyze",
+    is_flag=True,
+    default=False,
+    help="Analyze secrets using GitGuardian API for type detection and validity.",
+)
+@click.option(
     "--check",
     is_flag=True,
     default=False,
     help="Check found secrets against HasMySecretLeaked API for public exposure.",
+)
+@click.option(
+    "-o",
+    "--output",
+    type=click.Path(dir_okay=False, writable=True, path_type=Path),
+    default=None,
+    help="Write detailed JSON results to file (requires --analyze).",
 )
 @click.option(
     "-f",
@@ -205,7 +226,9 @@ class ScanProgressReporter:
 )
 def scan_cmd(
     ctx: click.Context,
+    analyze: bool,
     check: bool,
+    output: Optional[Path],
     full_hashes: bool,
     timeout: int,
     min_chars: int,
@@ -217,8 +240,9 @@ def scan_cmd(
     Scan the local machine for secrets.
 
     Gathers potential secrets from environment variables, configuration files,
-    and private key files. Optionally checks if found secrets have been
-    publicly exposed using GitGuardian's HasMySecretLeaked service.
+    and private key files. Optionally analyzes secrets using the GitGuardian API
+    for type detection and validity, or checks if they have been publicly exposed
+    using GitGuardian's HasMySecretLeaked service.
 
     \b
     Sources scanned:
@@ -230,9 +254,12 @@ def scan_cmd(
 
     \b
     Examples:
-      ggshield machine scan                    # Fast inventory only
-      ggshield machine scan --check            # Inventory + HMSL leak check
-      ggshield machine scan --check --timeout 30  # With 30s filesystem timeout
+      ggshield machine scan                      # Fast inventory only
+      ggshield machine scan --analyze            # Analyze with GitGuardian API
+      ggshield machine scan --analyze -v         # Verbose per-secret details
+      ggshield machine scan --analyze -o out.json  # Save detailed results
+      ggshield machine scan --check              # HMSL leak check
+      ggshield machine scan --analyze --check    # Both analysis and leak check
     """
     ctx_obj = ContextObj.get(ctx)
 
@@ -278,20 +305,145 @@ def scan_cmd(
             "Use --timeout to increase the limit."
         )
 
+    # Validate options
+    if output and not analyze:
+        raise click.UsageError("--output requires --analyze flag")
+
     if not secrets:
         if not ctx_obj.use_json:
             ui.display_info("\nNo secrets found.")
         return ExitCode.SUCCESS
 
-    if not check:
+    # If neither analyze nor check, just show inventory
+    if not analyze and not check:
         display_scan_results(secrets, ctx_obj.use_json)
         return ExitCode.SUCCESS
 
-    # Check against HMSL
+    # Handle --analyze (with optional --check)
+    if analyze:
+        return _run_analysis(
+            ctx=ctx,
+            secrets=secrets,
+            check=check,
+            full_hashes=full_hashes,
+            output_file=output,
+        )
+
+    # Handle --check only (no --analyze)
+    return _run_hmsl_check(
+        ctx=ctx,
+        secrets=secrets,
+        full_hashes=full_hashes,
+    )
+
+
+def _run_analysis(
+    ctx: click.Context,
+    secrets: List[GatheredSecret],
+    check: bool,
+    full_hashes: bool,
+    output_file: Optional[Path],
+) -> int:
+    """
+    Run GitGuardian API analysis on gathered secrets.
+
+    Optionally also run HMSL check if --check flag is set.
+    """
+    from ggshield.core.client import create_client_from_config
+    from ggshield.verticals.machine.analyzer import MachineSecretAnalyzer
+
+    ctx_obj = ContextObj.get(ctx)
+
+    ui.display_info(f"\nAnalyzing {len(secrets)} secrets with GitGuardian API...")
+
+    # Create client and analyzer
+    client = create_client_from_config(ctx_obj.config)
+    analyzer = MachineSecretAnalyzer(client)
+
+    # Run analysis
+    result = analyzer.analyze(secrets)
+
+    # If --check is also set, run HMSL check and merge results
+    if check:
+        _merge_hmsl_results(ctx, secrets, result, full_hashes)
+
+    # Display results
+    display_analyzed_results(
+        result,
+        json_output=ctx_obj.use_json,
+        verbose=ui.is_verbose(),
+        output_file=output_file,
+    )
+
+    # Return appropriate exit code
+    if result.detected_count > 0:
+        return ExitCode.SCAN_FOUND_PROBLEMS
+    return ExitCode.SUCCESS
+
+
+def _merge_hmsl_results(
+    ctx: click.Context,
+    secrets: List[GatheredSecret],
+    result: AnalysisResult,
+    full_hashes: bool,
+) -> None:
+    """
+    Run HMSL check and merge leaked status into analysis results.
+    """
+    from ggshield.verticals.hmsl.client import HMSLClient
+    from ggshield.verticals.hmsl.utils import get_client
+
+    ui.display_info("Checking secrets against HasMySecretLeaked...")
+
+    # Convert to format expected by HMSL
+    secrets_with_keys = [
+        SecretWithKey(
+            key=f"{s.metadata.secret_name} ({s.metadata.source_path})",
+            value=s.value,
+        )
+        for s in secrets
+    ]
+
+    naming_strategy = NAMING_STRATEGIES["key"]
+    # Always use full_hashes=True for prepare() - client.check() needs full hashes
+    # The full_hashes param to client.check() controls the API endpoint used
+    prepared_data = prepare(secrets_with_keys, naming_strategy, full_hashes=True)
+
+    # Get HMSL client and check
+    ctx_obj = ContextObj.get(ctx)
+    hmsl_client: HMSLClient = get_client(ctx_obj.config, ctx.command_path)
+
+    # Query HMSL
+    found_secrets = hmsl_client.check(prepared_data.payload, full_hashes=full_hashes)
+
+    # Build a set of leaked secret names for quick lookup
+    # Secret object has 'hash', use mapping to get the name
+    leaked_names = set()
+    for secret in found_secrets:
+        name = prepared_data.mapping.get(secret.hash)
+        if name:
+            leaked_names.add(name)
+
+    # Merge into analysis results
+    for analyzed in result.analyzed_secrets:
+        metadata = analyzed.gathered_secret.metadata
+        key = f"{metadata.secret_name} ({metadata.source_path})"
+        analyzed.hmsl_leaked = key in leaked_names
+
+    leaked_count = sum(1 for a in result.analyzed_secrets if a.hmsl_leaked)
+    if leaked_count > 0:
+        ui.display_warning(f"Found {leaked_count} leaked secrets!")
+
+
+def _run_hmsl_check(
+    ctx: click.Context,
+    secrets: List[GatheredSecret],
+    full_hashes: bool,
+) -> int:
+    """Run HMSL check only (no API analysis)."""
     ui.display_info(f"Checking {len(secrets)} secrets against HasMySecretLeaked...")
 
     # Convert to format expected by HMSL
-    # Include source path so users know where to fix leaked secrets
     secrets_with_keys = [
         SecretWithKey(
             key=f"{s.metadata.secret_name} ({s.metadata.source_path})",
