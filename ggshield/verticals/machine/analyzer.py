@@ -13,7 +13,7 @@ from pygitguardian.models import Detail, MultiScanResult, ScanResult, TokenScope
 from ggshield.core.client import check_client_api_key
 from ggshield.core.errors import QuotaLimitReachedError, handle_api_error
 from ggshield.utils.itertools import batched
-from ggshield.verticals.machine.sources import GatheredSecret
+from ggshield.verticals.machine.sources import GatheredSecret, SourceType
 
 
 logger = logging.getLogger(__name__)
@@ -59,6 +59,12 @@ class AnalyzedSecret:
         """Byte length for GIM inventory."""
         return len(self.gathered_secret.value.encode("utf-8"))
 
+    def get_display_name(self) -> str:
+        """Get the detector display name, falling back to 'Unidentified'."""
+        if self.is_detected:
+            return self.detector_display_name or self.detector_name or "Unidentified"
+        return "Unidentified"
+
 
 @dataclass
 class AnalysisResult:
@@ -94,10 +100,7 @@ class AnalysisResult:
         counts: Dict[str, Dict[str, int]] = {}
 
         for secret in self.analyzed_secrets:
-            if not secret.is_detected:
-                detector = "Unknown"
-            else:
-                detector = secret.detector_display_name or secret.detector_name or "Unknown"
+            detector = secret.get_display_name()
 
             if detector not in counts:
                 counts[detector] = {"count": 0, "valid": 0, "invalid": 0, "unknown": 0}
@@ -190,24 +193,40 @@ class MachineSecretAnalyzer:
         result.analyzed_secrets = all_analyzed
         return result
 
-    def _create_documents(
-        self, secrets: List[GatheredSecret]
-    ) -> List[Dict[str, str]]:
+    def _create_documents(self, secrets: List[GatheredSecret]) -> List[Dict[str, str]]:
         """
         Convert gathered secrets to document format for API.
 
         Each document contains:
-        - document: The secret value to analyze
+        - document: The secret value (or NAME=value for env vars to provide context)
         - filename: Source path for context (truncated to API limit)
+
+        For environment variables and .env files, we send "NAME=value" format
+        because the API uses the variable name as context for detection.
+        For example, "METABASE_API_KEY=xxx" triggers "Generic High Entropy Secret"
+        detection, while just "xxx" alone would not be detected.
         """
         documents = []
         for secret in secrets:
             # Use source path and name for context
             filename = f"{secret.metadata.source_path}:{secret.metadata.secret_name}"
-            documents.append({
-                "document": secret.value,
-                "filename": filename[-_API_PATH_MAX_LENGTH:],
-            })
+
+            # For env vars and .env files, send NAME=value to give API context
+            # This significantly improves detection of generic high-entropy secrets
+            if secret.metadata.source_type in (
+                SourceType.ENV_FILE,
+                SourceType.ENVIRONMENT_VAR,
+            ):
+                document = f"{secret.metadata.secret_name}={secret.value}"
+            else:
+                document = secret.value
+
+            documents.append(
+                {
+                    "document": document,
+                    "filename": filename[-_API_PATH_MAX_LENGTH:],
+                }
+            )
         return documents
 
     def _merge_results(

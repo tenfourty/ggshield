@@ -308,9 +308,10 @@ class TestUnifiedFileSystemWalker:
         THEN matches_by_type counts files, secrets_by_type counts secrets
         """
         # Create one file with multiple secrets
+        # Note: DATABASE_PASSWORD used instead of DATABASE_URL since URLs are filtered
         (tmp_path / ".env").write_text(
             "API_KEY=my_secret_api_key\n"
-            "DATABASE_URL=postgres://user:pass@localhost/db\n"
+            "DATABASE_PASSWORD=super_secret_pass123\n"
             "SECRET_TOKEN=another_secret_value\n"
         )
 

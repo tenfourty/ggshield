@@ -213,8 +213,8 @@ class TestAnalysisResult:
         assert counts["GitHub Token"]["count"] == 1
         assert counts["GitHub Token"]["valid"] == 1
 
-    def test_get_counts_by_detector_unknown(self):
-        """Test undetected secrets are grouped as Unknown."""
+    def test_get_counts_by_detector_unidentified(self):
+        """Test undetected secrets are grouped as Unidentified."""
         result = AnalysisResult(
             analyzed_secrets=[
                 AnalyzedSecret(
@@ -225,8 +225,8 @@ class TestAnalysisResult:
         )
         counts = result.get_counts_by_detector()
 
-        assert "Unknown" in counts
-        assert counts["Unknown"]["count"] == 1
+        assert "Unidentified" in counts
+        assert counts["Unidentified"]["count"] == 1
 
 
 class TestMachineSecretAnalyzer:
@@ -264,10 +264,11 @@ class TestMachineSecretAnalyzer:
         analyzer.analyze(secrets)
 
         # Verify document format
+        # For env vars and .env files, we send NAME=value to provide context to the API
         call_args = client.multi_content_scan.call_args
         documents = call_args[0][0]
         assert len(documents) == 1
-        assert documents[0]["document"] == "AKIAIOSFODNN7EXAMPLE"
+        assert documents[0]["document"] == "AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE"
         assert "/home/user/.env:AWS_ACCESS_KEY_ID" in documents[0]["filename"]
 
     @patch("ggshield.verticals.machine.analyzer.check_client_api_key")
@@ -277,15 +278,17 @@ class TestMachineSecretAnalyzer:
         client.secret_scan_preferences.maximum_documents_per_scan = 20
         client.multi_content_scan.return_value = MultiScanResult(
             scan_results=[
-                make_scan_result([
-                    make_policy_break(
-                        detector_name="aws_access_key",
-                        break_type="AWS Keys",
-                        validity="valid",
-                        known_secret=True,
-                        incident_url="https://dashboard.gitguardian.com/incidents/123",
-                    )
-                ])
+                make_scan_result(
+                    [
+                        make_policy_break(
+                            detector_name="aws_access_key",
+                            break_type="AWS Keys",
+                            validity="valid",
+                            known_secret=True,
+                            incident_url="https://dashboard.gitguardian.com/incidents/123",
+                        )
+                    ]
+                )
             ]
         )
 
@@ -300,7 +303,9 @@ class TestMachineSecretAnalyzer:
         assert analyzed.detector_display_name == "AWS Keys"
         assert analyzed.validity == "valid"
         assert analyzed.known_secret is True
-        assert analyzed.incident_url == "https://dashboard.gitguardian.com/incidents/123"
+        assert (
+            analyzed.incident_url == "https://dashboard.gitguardian.com/incidents/123"
+        )
         assert analyzed.gathered_secret.value == "AKIAIOSFODNN7EXAMPLE"
 
     @patch("ggshield.verticals.machine.analyzer.check_client_api_key")
@@ -330,15 +335,23 @@ class TestMachineSecretAnalyzer:
         client.secret_scan_preferences.maximum_documents_per_scan = 20
         client.multi_content_scan.return_value = MultiScanResult(
             scan_results=[
-                make_scan_result([make_policy_break(
-                    detector_name="aws_access_key",
-                    break_type="AWS Keys",
-                )]),
+                make_scan_result(
+                    [
+                        make_policy_break(
+                            detector_name="aws_access_key",
+                            break_type="AWS Keys",
+                        )
+                    ]
+                ),
                 make_scan_result([]),  # No detection
-                make_scan_result([make_policy_break(
-                    detector_name="github_token",
-                    break_type="GitHub Token",
-                )]),
+                make_scan_result(
+                    [
+                        make_policy_break(
+                            detector_name="github_token",
+                            break_type="GitHub Token",
+                        )
+                    ]
+                ),
             ]
         )
 

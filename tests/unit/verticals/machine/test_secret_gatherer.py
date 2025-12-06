@@ -256,7 +256,9 @@ MIIEowIBAAKCAQEA0Z3VS5JJcds3xfn/ygWyF8PbnGy0AHB7MBAuMfB6JaALzdGk
         """
         ssh_dir = tmp_path / ".ssh"
         ssh_dir.mkdir()
-        key_content = "-----BEGIN RSA PRIVATE KEY-----\ntest\n-----END RSA PRIVATE KEY-----"
+        key_content = (
+            "-----BEGIN RSA PRIVATE KEY-----\ntest\n-----END RSA PRIVATE KEY-----"
+        )
         (ssh_dir / "id_rsa").write_text(key_content)
 
         # Make .gnupg unreadable to trigger error
@@ -286,7 +288,9 @@ MIIEowIBAAKCAQEA0Z3VS5JJcds3xfn/ygWyF8PbnGy0AHB7MBAuMfB6JaALzdGk
         """
         ssh_dir = tmp_path / ".ssh"
         ssh_dir.mkdir()
-        key_content = "-----BEGIN RSA PRIVATE KEY-----\ntest\n-----END RSA PRIVATE KEY-----"
+        key_content = (
+            "-----BEGIN RSA PRIVATE KEY-----\ntest\n-----END RSA PRIVATE KEY-----"
+        )
         (ssh_dir / "id_rsa").write_text(key_content)
 
         # Create a subdirectory
@@ -320,7 +324,9 @@ MIIEowIBAAKCAQEA0Z3VS5JJcds3xfn/ygWyF8PbnGy0AHB7MBAuMfB6JaALzdGk
         (ssh_dir / "large_key").write_text(large_content)
 
         # Create a normal key for comparison
-        key_content = "-----BEGIN RSA PRIVATE KEY-----\ntest\n-----END RSA PRIVATE KEY-----"
+        key_content = (
+            "-----BEGIN RSA PRIVATE KEY-----\ntest\n-----END RSA PRIVATE KEY-----"
+        )
         (ssh_dir / "id_rsa").write_text(key_content)
 
         with patch.dict(os.environ, {}, clear=True):
@@ -348,7 +354,9 @@ MIIEowIBAAKCAQEA0Z3VS5JJcds3xfn/ygWyF8PbnGy0AHB7MBAuMfB6JaALzdGk
         (ssh_dir / "empty_key").write_text("")
 
         # Create a normal key for comparison
-        key_content = "-----BEGIN RSA PRIVATE KEY-----\ntest\n-----END RSA PRIVATE KEY-----"
+        key_content = (
+            "-----BEGIN RSA PRIVATE KEY-----\ntest\n-----END RSA PRIVATE KEY-----"
+        )
         (ssh_dir / "id_rsa").write_text(key_content)
 
         with patch.dict(os.environ, {}, clear=True):
@@ -376,7 +384,9 @@ MIIEowIBAAKCAQEA0Z3VS5JJcds3xfn/ygWyF8PbnGy0AHB7MBAuMfB6JaALzdGk
         (ssh_dir / "not_a_key").write_text("This is not a private key")
 
         # Create a normal key for comparison
-        key_content = "-----BEGIN RSA PRIVATE KEY-----\ntest\n-----END RSA PRIVATE KEY-----"
+        key_content = (
+            "-----BEGIN RSA PRIVATE KEY-----\ntest\n-----END RSA PRIVATE KEY-----"
+        )
         (ssh_dir / "id_rsa").write_text(key_content)
 
         with patch.dict(os.environ, {}, clear=True):
@@ -400,7 +410,9 @@ MIIEowIBAAKCAQEA0Z3VS5JJcds3xfn/ygWyF8PbnGy0AHB7MBAuMfB6JaALzdGk
         ssh_dir = tmp_path / ".ssh"
         ssh_dir.mkdir()
 
-        key_content = "-----BEGIN RSA PRIVATE KEY-----\ntest\n-----END RSA PRIVATE KEY-----"
+        key_content = (
+            "-----BEGIN RSA PRIVATE KEY-----\ntest\n-----END RSA PRIVATE KEY-----"
+        )
         (ssh_dir / "id_rsa").write_text(key_content)
         (ssh_dir / "test_key").write_text(key_content)
 
@@ -430,7 +442,9 @@ MIIEowIBAAKCAQEA0Z3VS5JJcds3xfn/ygWyF8PbnGy0AHB7MBAuMfB6JaALzdGk
         ssh_dir = tmp_path / ".ssh"
         ssh_dir.mkdir()
 
-        key_content = "-----BEGIN RSA PRIVATE KEY-----\ntest\n-----END RSA PRIVATE KEY-----"
+        key_content = (
+            "-----BEGIN RSA PRIVATE KEY-----\ntest\n-----END RSA PRIVATE KEY-----"
+        )
         for i in range(5):
             (ssh_dir / f"id_rsa_{i}").write_text(key_content)
 
@@ -507,5 +521,5 @@ MIIEowIBAAKCAQEA0Z3VS5JJcds3xfn/ygWyF8PbnGy0AHB7MBAuMfB6JaALzdGk
 
         # Should have at least one progress call
         assert len(progress_calls) >= 1
-        # Last call should mention filesystem
-        assert any("filesystem" in call[0].lower() for call in progress_calls)
+        # Last call should mention home directory
+        assert any("home directory" in call[0].lower() for call in progress_calls)

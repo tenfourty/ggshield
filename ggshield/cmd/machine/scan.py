@@ -31,7 +31,9 @@ from ggshield.verticals.hmsl.collection import (
     prepare,
 )
 from ggshield.verticals.machine.output import (
+    SOURCE_LABELS,
     display_analyzed_results,
+    display_hmsl_check_results,
     display_scan_results,
 )
 from ggshield.verticals.machine.secret_gatherer import (
@@ -49,14 +51,23 @@ logger = logging.getLogger(__name__)
 # Progress spinner characters (braille pattern)
 SPINNER_CHARS = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
 
-# Human-readable labels for source types
-SOURCE_LABELS = {
-    SourceType.ENVIRONMENT_VAR: "Environment variables",
-    SourceType.GITHUB_TOKEN: "GitHub token",
-    SourceType.NPMRC: "NPM configuration",
-    SourceType.ENV_FILE: "Environment files",
-    SourceType.PRIVATE_KEY: "Private keys",
-}
+
+def _format_source_status(result: SourceResult) -> str:
+    """Format status string based on source type."""
+    if result.source_type == SourceType.ENVIRONMENT_VAR:
+        return str(result.secrets_found)
+    elif result.source_type == SourceType.GITHUB_TOKEN:
+        return result.message or ("found" if result.secrets_found else "not found")
+    elif result.source_type == SourceType.NPMRC:
+        return result.message or "not found"
+    elif result.source_type == SourceType.ENV_FILE:
+        return (
+            f"{result.files_scanned} {pluralize('file', result.files_scanned)}, "
+            f"{result.secrets_found} {pluralize('secret', result.secrets_found)}"
+        )
+    elif result.source_type == SourceType.PRIVATE_KEY:
+        return f"{result.files_scanned} {pluralize('file', result.files_scanned)}"
+    return str(result.secrets_found)
 
 
 class ScanProgressReporter:
@@ -96,28 +107,10 @@ class ScanProgressReporter:
             return
 
         label = SOURCE_LABELS.get(result.source_type, result.source_type.name)
-
-        if result.source_type == SourceType.ENVIRONMENT_VAR:
-            status = str(result.secrets_found)
-        elif result.source_type == SourceType.GITHUB_TOKEN:
-            status = result.message or ("found" if result.secrets_found else "not found")
-        elif result.source_type == SourceType.NPMRC:
-            status = result.message or "not found"
-        elif result.source_type == SourceType.ENV_FILE:
-            status = (
-                f"{result.files_scanned} {pluralize('file', result.files_scanned)}, "
-                f"{result.secrets_found} {pluralize('secret', result.secrets_found)}"
-            )
-        elif result.source_type == SourceType.PRIVATE_KEY:
-            status = f"{result.files_scanned} {pluralize('file', result.files_scanned)}"
-        else:
-            status = str(result.secrets_found)
+        status = _format_source_status(result)
 
         # Use checkmark for completed, x for not found
-        if result.status == SourceStatus.NOT_FOUND:
-            icon = "○"
-        else:
-            icon = "✓"
+        icon = "○" if result.status == SourceStatus.NOT_FOUND else "✓"
 
         self._write_line(f"  {icon} {label}: {status}")
 
@@ -132,7 +125,7 @@ class ScanProgressReporter:
         spinner = SPINNER_CHARS[self.spinner_index % len(SPINNER_CHARS)]
         self.spinner_index += 1
 
-        # Handle unified phase format "Scanning filesystem | .env: N | keys: N"
+        # Handle unified phase format "Scanning home directory | .env: N | keys: N"
         if " | " in phase:
             parts = phase.split(" | ")
             base_phase = parts[0]
@@ -316,7 +309,7 @@ def scan_cmd(
 
     # If neither analyze nor check, just show inventory
     if not analyze and not check:
-        display_scan_results(secrets, ctx_obj.use_json)
+        display_scan_results(secrets, ctx_obj.use_json, verbose=ui.is_verbose())
         return ExitCode.SUCCESS
 
     # Handle --analyze (with optional --check)
@@ -381,6 +374,34 @@ def _run_analysis(
     return ExitCode.SUCCESS
 
 
+# --------------------------------------------------------------------------
+# HMSL helper functions
+# --------------------------------------------------------------------------
+
+
+def _prepare_secrets_for_hmsl(secrets: List[GatheredSecret]):
+    """Convert gathered secrets to HMSL format."""
+    secrets_with_keys = [
+        SecretWithKey(
+            key=f"{s.metadata.secret_name} ({s.metadata.source_path})",
+            value=s.value,
+        )
+        for s in secrets
+    ]
+    naming_strategy = NAMING_STRATEGIES["key"]
+    return prepare(secrets_with_keys, naming_strategy, full_hashes=True)
+
+
+def _extract_leaked_keys(found_secrets, prepared_data) -> set:
+    """Extract leaked secret keys from HMSL response."""
+    leaked_keys: set = set()
+    for secret in found_secrets:
+        name = prepared_data.mapping.get(secret.hash)
+        if name:
+            leaked_keys.add(name)
+    return leaked_keys
+
+
 def _merge_hmsl_results(
     ctx: click.Context,
     secrets: List[GatheredSecret],
@@ -395,19 +416,7 @@ def _merge_hmsl_results(
 
     ui.display_info("Checking secrets against HasMySecretLeaked...")
 
-    # Convert to format expected by HMSL
-    secrets_with_keys = [
-        SecretWithKey(
-            key=f"{s.metadata.secret_name} ({s.metadata.source_path})",
-            value=s.value,
-        )
-        for s in secrets
-    ]
-
-    naming_strategy = NAMING_STRATEGIES["key"]
-    # Always use full_hashes=True for prepare() - client.check() needs full hashes
-    # The full_hashes param to client.check() controls the API endpoint used
-    prepared_data = prepare(secrets_with_keys, naming_strategy, full_hashes=True)
+    prepared_data = _prepare_secrets_for_hmsl(secrets)
 
     # Get HMSL client and check
     ctx_obj = ContextObj.get(ctx)
@@ -415,20 +424,13 @@ def _merge_hmsl_results(
 
     # Query HMSL
     found_secrets = hmsl_client.check(prepared_data.payload, full_hashes=full_hashes)
-
-    # Build a set of leaked secret names for quick lookup
-    # Secret object has 'hash', use mapping to get the name
-    leaked_names = set()
-    for secret in found_secrets:
-        name = prepared_data.mapping.get(secret.hash)
-        if name:
-            leaked_names.add(name)
+    leaked_keys = _extract_leaked_keys(found_secrets, prepared_data)
 
     # Merge into analysis results
     for analyzed in result.analyzed_secrets:
         metadata = analyzed.gathered_secret.metadata
         key = f"{metadata.secret_name} ({metadata.source_path})"
-        analyzed.hmsl_leaked = key in leaked_names
+        analyzed.hmsl_leaked = key in leaked_keys
 
     leaked_count = sum(1 for a in result.analyzed_secrets if a.hmsl_leaked)
     if leaked_count > 0:
@@ -441,29 +443,30 @@ def _run_hmsl_check(
     full_hashes: bool,
 ) -> int:
     """Run HMSL check only (no API analysis)."""
-    ui.display_info(f"Checking {len(secrets)} secrets against HasMySecretLeaked...")
+    from ggshield.verticals.hmsl.client import HMSLClient
+    from ggshield.verticals.hmsl.utils import get_client
 
-    # Convert to format expected by HMSL
-    secrets_with_keys = [
-        SecretWithKey(
-            key=f"{s.metadata.secret_name} ({s.metadata.source_path})",
-            value=s.value,
-        )
-        for s in secrets
-    ]
+    ui.display_info(f"\nChecking {len(secrets)} secrets against HasMySecretLeaked...")
 
-    naming_strategy = NAMING_STRATEGIES["key"]
-    prepared_data = prepare(secrets_with_keys, naming_strategy, full_hashes=True)
+    prepared_data = _prepare_secrets_for_hmsl(secrets)
 
-    ui.display_info(f"Prepared {len(prepared_data.payload)} unique secret hashes.")
+    # Get HMSL client and check
+    ctx_obj = ContextObj.get(ctx)
+    hmsl_client: HMSLClient = get_client(ctx_obj.config, ctx.command_path)
 
-    # Import here to avoid circular imports
-    from ggshield.cmd.hmsl.hmsl_utils import check_secrets
+    # Query HMSL
+    found_secrets = hmsl_client.check(prepared_data.payload, full_hashes=full_hashes)
+    leaked_keys = _extract_leaked_keys(found_secrets, prepared_data)
 
-    check_secrets(
-        ctx=ctx,
-        prepared_secrets=prepared_data,
-        full_hashes=full_hashes,
+    # Display results
+    display_hmsl_check_results(
+        secrets,
+        leaked_keys,
+        json_output=ctx_obj.use_json,
+        verbose=ui.is_verbose(),
     )
 
+    # Return appropriate exit code
+    if leaked_keys:
+        return ExitCode.SCAN_FOUND_PROBLEMS
     return ExitCode.SUCCESS

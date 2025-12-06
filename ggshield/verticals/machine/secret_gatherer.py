@@ -233,7 +233,7 @@ class MachineSecretGatherer:
         walker = UnifiedFileSystemWalker(walker_config)
 
         # Single filesystem traversal
-        self._report_progress_force("Scanning filesystem")
+        self._report_progress_force("Scanning home directory")
         for secret in walker.walk():
             self._stats.total_files_visited = walker.stats.files_visited
             yield secret
@@ -372,7 +372,7 @@ class MachineSecretGatherer:
         # Pass phase with counts embedded for display
         env_count = matches_by_type.get(SourceType.ENV_FILE, 0)
         key_count = matches_by_type.get(SourceType.PRIVATE_KEY, 0)
-        phase = f"Scanning filesystem | .env: {env_count} | keys: {key_count}"
+        phase = f"Scanning home directory | .env: {env_count} | keys: {key_count}"
         self.config.on_progress(phase, files_visited, elapsed)
 
     def _is_timed_out(self) -> bool:

@@ -95,7 +95,7 @@ class TestEnvFileMatcher:
         """
         env_content = """
 API_KEY=my_secret_api_key
-DATABASE_URL=postgres://user:pass@localhost/db
+DATABASE_PASSWORD=super_secret_pass123
 """
         env_file = tmp_path / ".env"
         env_file.write_text(env_content)
@@ -105,7 +105,7 @@ DATABASE_URL=postgres://user:pass@localhost/db
 
         assert len(secrets) == 2
         names = {s.metadata.secret_name for s in secrets}
-        assert names == {"API_KEY", "DATABASE_URL"}
+        assert names == {"API_KEY", "DATABASE_PASSWORD"}
 
     def test_extract_secrets_removes_quotes(self, tmp_path: Path):
         """
@@ -244,3 +244,142 @@ LONG_ENOUGH=this_is_long_enough
         assert ".env" in allowed
         assert ".aws" in allowed
         assert ".config" in allowed
+
+    def test_extract_secrets_skips_placeholder_values(self, tmp_path: Path):
+        """
+        GIVEN a .env file with placeholder values
+        WHEN extracting secrets
+        THEN skips placeholder values and keeps real secrets
+        """
+        env_content = """
+# Placeholder values that should be skipped
+API_KEY=test
+DATABASE_PASSWORD=changeme
+SECRET_TOKEN=your_api_key
+AUTH_KEY=placeholder
+FILL_VALUE=–––––––FILL-ME–––––––––
+TEMPLATE_KEY=your_secret_here
+
+# Real secrets that should be kept
+REAL_API_KEY=sk_live_abc123xyz789
+REAL_TOKEN=ghp_xxxxxxxxxxxxxxxxxxxx
+"""
+        env_file = tmp_path / ".env"
+        env_file.write_text(env_content)
+
+        matcher = EnvFileMatcher(min_chars=5)
+        secrets = list(matcher.extract_secrets(env_file, set()))
+
+        names = {s.metadata.secret_name for s in secrets}
+        # Placeholders should be skipped
+        assert "API_KEY" not in names
+        assert "DATABASE_PASSWORD" not in names
+        assert "SECRET_TOKEN" not in names
+        assert "AUTH_KEY" not in names
+        assert "FILL_VALUE" not in names
+        assert "TEMPLATE_KEY" not in names
+        # Real secrets should be kept
+        assert "REAL_API_KEY" in names
+        assert "REAL_TOKEN" in names
+
+    def test_extract_secrets_skips_unresolved_variables(self, tmp_path: Path):
+        """
+        GIVEN a .env file with unresolved variable references
+        WHEN extracting secrets
+        THEN skips them (they're not real values)
+        """
+        env_content = """
+UNRESOLVED_VAR=${SOME_OTHER_VAR}
+ANOTHER_UNRESOLVED=$OTHER_VAR
+REAL_SECRET=actual_secret_value_here
+"""
+        env_file = tmp_path / ".env"
+        env_file.write_text(env_content)
+
+        matcher = EnvFileMatcher(min_chars=5)
+        secrets = list(matcher.extract_secrets(env_file, set()))
+
+        names = {s.metadata.secret_name for s in secrets}
+        # Unresolved variables should be skipped
+        assert "UNRESOLVED_VAR" not in names
+        assert "ANOTHER_UNRESOLVED" not in names
+        # Real secret should be kept
+        assert "REAL_SECRET" in names
+
+    def test_extract_secrets_skips_non_secret_names(self, tmp_path: Path):
+        """
+        GIVEN a .env file with non-secret variable names
+        WHEN extracting secrets
+        THEN skips variables with names indicating config (not secrets)
+        """
+        env_content = """
+# Non-secret names that should be skipped
+DATABASE_URL=postgres://localhost:5432/mydb
+API_HOST=api.example.com
+AWS_REGION=us-east-1
+METABASE_URL=https://metabase.example.com
+LOG_LEVEL=debug
+SNOWFLAKE_WAREHOUSE=compute_warehouse
+SNOWFLAKE_ROLE=analyst_role
+
+# Real secrets that should be kept
+API_KEY=sk_live_abc123xyz789012345
+SECRET_TOKEN=ghp_xxxxxxxxxxxxxxxxxxxx
+"""
+        env_file = tmp_path / ".env"
+        env_file.write_text(env_content)
+
+        matcher = EnvFileMatcher(min_chars=5)
+        secrets = list(matcher.extract_secrets(env_file, set()))
+
+        names = {s.metadata.secret_name for s in secrets}
+        # Non-secret names should be skipped
+        assert "DATABASE_URL" not in names
+        assert "API_HOST" not in names
+        assert "AWS_REGION" not in names
+        assert "METABASE_URL" not in names
+        assert "LOG_LEVEL" not in names
+        assert "SNOWFLAKE_WAREHOUSE" not in names
+        assert "SNOWFLAKE_ROLE" not in names
+        # Real secrets should be kept
+        assert "API_KEY" in names
+        assert "SECRET_TOKEN" in names
+
+    def test_extract_secrets_skips_non_secret_values(self, tmp_path: Path):
+        """
+        GIVEN a .env file with non-secret values
+        WHEN extracting secrets
+        THEN skips values that look like config (URLs, IPs, paths)
+        """
+        env_content = """
+# Non-secret values that should be skipped
+SOME_URL=https://api.example.com/v1
+SOME_IP=192.168.1.100
+SOME_PATH=/var/log/app.log
+SOME_BOOL=enabled
+SOME_LEVEL=production
+SOME_EMAIL=user@example.com
+SOME_REGION=eu-west-2
+
+# Real secrets that should be kept
+REAL_KEY=sk_live_abc123xyz789012345
+REAL_TOKEN=ghp_xxxxxxxxxxxxxxxxxxxx
+"""
+        env_file = tmp_path / ".env"
+        env_file.write_text(env_content)
+
+        matcher = EnvFileMatcher(min_chars=5)
+        secrets = list(matcher.extract_secrets(env_file, set()))
+
+        names = {s.metadata.secret_name for s in secrets}
+        # Non-secret values should be skipped
+        assert "SOME_URL" not in names
+        assert "SOME_IP" not in names
+        assert "SOME_PATH" not in names
+        assert "SOME_BOOL" not in names
+        assert "SOME_LEVEL" not in names
+        assert "SOME_EMAIL" not in names
+        assert "SOME_REGION" not in names
+        # Real secrets should be kept
+        assert "REAL_KEY" in names
+        assert "REAL_TOKEN" in names

@@ -21,6 +21,21 @@ b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtzc2gtZW
 zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz
 -----END OPENSSH PRIVATE KEY-----"""
 
+# Sample public certificate (NOT a private key - should be ignored)
+SAMPLE_PUBLIC_CERTIFICATE = """-----BEGIN CERTIFICATE-----
+MIIDrzCCApegAwIBAgIQCDvgVpBCRrGhdWrJWZHHSjANBgkqhkiG9w0BAQUFADBh
+MQswCQYDVQQGEwJVUzEVMBMGA1UEChMMRGlnaUNlcnQgSW5jMRkwFwYDVQQLExB3
+d3cuZGlnaWNlcnQuY29tMSAwHgYDVQQDExdEaWdpQ2VydCBHbG9iYWwgUm9vdCBD
+-----END CERTIFICATE-----"""
+
+# Combined file with both certificate and private key (should be detected)
+SAMPLE_CERT_WITH_KEY = """-----BEGIN CERTIFICATE-----
+MIIDrzCCApegAwIBAgIQCDvgVpBCRrGhdWrJWZHHSjANBgkqhkiG9w0BAQUFADBh
+-----END CERTIFICATE-----
+-----BEGIN RSA PRIVATE KEY-----
+MIIEowIBAAKCAQEA0Z3VS5JJcds3xfn/ygWyF8PbnGy0AHB7MBAuMfB6JaALzdGk
+-----END RSA PRIVATE KEY-----"""
+
 
 class TestPrivateKeyMatcher:
     """Tests for PrivateKeyMatcher."""
@@ -233,3 +248,32 @@ class TestPrivateKeyMatcher:
         assert ".certs" in allowed
         assert ".aws" in allowed
         assert ".config" in allowed
+
+    def test_extract_secrets_ignores_public_certificates(self, tmp_path: Path):
+        """
+        GIVEN a .pem file containing only a public certificate (no private key)
+        WHEN extracting secrets
+        THEN ignores it (public certs are not secrets)
+        """
+        cert_file = tmp_path / "ca_certificate.pem"
+        cert_file.write_text(SAMPLE_PUBLIC_CERTIFICATE)
+
+        matcher = PrivateKeyMatcher()
+        secrets = list(matcher.extract_secrets(cert_file, set()))
+
+        assert len(secrets) == 0
+
+    def test_extract_secrets_detects_combined_cert_and_key(self, tmp_path: Path):
+        """
+        GIVEN a .pem file containing both a certificate and a private key
+        WHEN extracting secrets
+        THEN detects it (private key is present)
+        """
+        combined_file = tmp_path / "server_bundle.pem"
+        combined_file.write_text(SAMPLE_CERT_WITH_KEY)
+
+        matcher = PrivateKeyMatcher()
+        secrets = list(matcher.extract_secrets(combined_file, set()))
+
+        assert len(secrets) == 1
+        assert "BEGIN RSA PRIVATE KEY" in secrets[0].value

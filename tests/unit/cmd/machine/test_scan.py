@@ -445,9 +445,7 @@ class TestMachineScanAnalyze:
             "ggshield.cmd.machine.scan.MachineSecretGatherer",
             return_value=mock_gatherer,
         ):
-            with patch(
-                "ggshield.core.client.create_client_from_config"
-            ) as mock_client:
+            with patch("ggshield.core.client.create_client_from_config") as mock_client:
                 result = cli_fs_runner.invoke(cli, ["machine", "scan", "--analyze"])
 
         assert_invoke_ok(result)
@@ -477,13 +475,15 @@ class TestMachineScanAnalyze:
         mock_client = MagicMock()
         mock_client.multi_content_scan.return_value = MultiScanResult(
             scan_results=[
-                _make_scan_result([
-                    _make_policy_break(
-                        detector_name="aws_access_key",
-                        break_type="AWS Keys",
-                        validity="valid",
-                    )
-                ])
+                _make_scan_result(
+                    [
+                        _make_policy_break(
+                            detector_name="aws_access_key",
+                            break_type="AWS Keys",
+                            validity="valid",
+                        )
+                    ]
+                )
             ]
         )
 
@@ -495,12 +495,8 @@ class TestMachineScanAnalyze:
                 "ggshield.core.client.create_client_from_config",
                 return_value=mock_client,
             ):
-                with patch(
-                    "ggshield.verticals.machine.analyzer.check_client_api_key"
-                ):
-                    result = cli_fs_runner.invoke(
-                        cli, ["machine", "scan", "--analyze"]
-                    )
+                with patch("ggshield.verticals.machine.analyzer.check_client_api_key"):
+                    result = cli_fs_runner.invoke(cli, ["machine", "scan", "--analyze"])
 
         # Should return exit code 1 (found problems) when secrets detected
         assert_invoke_exited_with(result, 1)
@@ -530,12 +526,14 @@ class TestMachineScanAnalyze:
         mock_client = MagicMock()
         mock_client.multi_content_scan.return_value = MultiScanResult(
             scan_results=[
-                _make_scan_result([
-                    _make_policy_break(
-                        detector_name="generic_api_key",
-                        break_type="Generic API Key",
-                    )
-                ])
+                _make_scan_result(
+                    [
+                        _make_policy_break(
+                            detector_name="generic_api_key",
+                            break_type="Generic API Key",
+                        )
+                    ]
+                )
             ]
         )
 
@@ -547,9 +545,7 @@ class TestMachineScanAnalyze:
                 "ggshield.core.client.create_client_from_config",
                 return_value=mock_client,
             ):
-                with patch(
-                    "ggshield.verticals.machine.analyzer.check_client_api_key"
-                ):
+                with patch("ggshield.verticals.machine.analyzer.check_client_api_key"):
                     result = cli_fs_runner.invoke(
                         cli, ["machine", "scan", "--analyze", "--json"]
                     )
@@ -617,9 +613,7 @@ class TestMachineScanAnalyze:
                 "ggshield.core.client.create_client_from_config",
                 return_value=mock_client,
             ):
-                with patch(
-                    "ggshield.verticals.machine.analyzer.check_client_api_key"
-                ):
+                with patch("ggshield.verticals.machine.analyzer.check_client_api_key"):
                     result = cli_fs_runner.invoke(
                         cli,
                         ["machine", "scan", "--analyze", "--output", str(output_file)],
@@ -648,16 +642,18 @@ class TestMachineScanAnalyze:
         output_file = tmp_path / "results.json"
 
         mock_gatherer = MagicMock()
-        mock_gatherer.gather.return_value = iter([
-            GatheredSecret(
-                value="test",
-                metadata=SecretMetadata(
-                    source_type=SourceType.ENVIRONMENT_VAR,
-                    source_path="env",
-                    secret_name="KEY",
-                ),
-            )
-        ])
+        mock_gatherer.gather.return_value = iter(
+            [
+                GatheredSecret(
+                    value="test",
+                    metadata=SecretMetadata(
+                        source_type=SourceType.ENVIRONMENT_VAR,
+                        source_path="env",
+                        secret_name="KEY",
+                    ),
+                )
+            ]
+        )
         mock_gatherer.stats = GatheringStats()
 
         with patch(
@@ -708,13 +704,15 @@ class TestMachineScanAnalyze:
         mock_client = MagicMock()
         mock_client.multi_content_scan.return_value = MultiScanResult(
             scan_results=[
-                _make_scan_result([
-                    _make_policy_break(
-                        detector_name="aws_access_key",
-                        break_type="AWS Keys",
-                        validity="valid",
-                    )
-                ])
+                _make_scan_result(
+                    [
+                        _make_policy_break(
+                            detector_name="aws_access_key",
+                            break_type="AWS Keys",
+                            validity="valid",
+                        )
+                    ]
+                )
             ]
         )
 
@@ -739,9 +737,7 @@ class TestMachineScanAnalyze:
                 "ggshield.core.client.create_client_from_config",
                 return_value=mock_client,
             ):
-                with patch(
-                    "ggshield.verticals.machine.analyzer.check_client_api_key"
-                ):
+                with patch("ggshield.verticals.machine.analyzer.check_client_api_key"):
                     with patch(
                         "ggshield.verticals.hmsl.utils.get_client",
                         return_value=mock_hmsl_client,
@@ -764,9 +760,9 @@ class TestMachineScanAnalyze:
                 f"'{hash_value[:10]}...'. client.check() needs full hashes to compute hints."
             )
             # Verify it's valid hex
-            assert all(c in "0123456789abcdef" for c in hash_value), (
-                f"Hash contains non-hex characters: '{hash_value[:10]}...'"
-            )
+            assert all(
+                c in "0123456789abcdef" for c in hash_value
+            ), f"Hash contains non-hex characters: '{hash_value[:10]}...'"
 
         # Should return exit code 1 (found problems) when secrets detected
         assert_invoke_exited_with(result, 1)

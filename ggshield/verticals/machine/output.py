@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
 import click
 
@@ -28,6 +28,59 @@ SOURCE_LABELS: Dict[SourceType, str] = {
     SourceType.ENV_FILE: "Environment files",
     SourceType.PRIVATE_KEY: "Private keys",
 }
+
+
+def _detector_sort_key(item: Tuple[str, Dict[str, int]]) -> Tuple[int, int]:
+    """Sort by count descending, with Unidentified always last."""
+    detector, stats = item
+    if detector == "Unidentified":
+        return (1, 0)  # Always last
+    return (0, -stats["count"])  # By count descending
+
+
+def _build_validity_string(valid: int, invalid: int) -> str:
+    """Build validity summary string like '(2 valid, 1 invalid)'."""
+    parts = []
+    if valid > 0:
+        parts.append(f"{valid} valid")
+    if invalid > 0:
+        parts.append(f"{invalid} invalid")
+    return f" ({', '.join(parts)})" if parts else ""
+
+
+def _display_errors(errors: List[str]) -> None:
+    """Display error warnings with indentation."""
+    if errors:
+        for error in errors:
+            ui.display_warning(f"  {error}")
+        ui.display_info("")
+
+
+def _count_leaked_secrets(secrets: List[GatheredSecret], leaked_keys: set) -> int:
+    """Count how many secrets are in the leaked keys set."""
+    return sum(
+        1
+        for s in secrets
+        if f"{s.metadata.secret_name} ({s.metadata.source_path})" in leaked_keys
+    )
+
+
+def _display_hmsl_header(leaked_count: int, total: int) -> None:
+    """Display HMSL check result header."""
+    if leaked_count > 0:
+        ui.display_warning(
+            f"Found {leaked_count} leaked {pluralize('secret', leaked_count)} "
+            f"out of {total} checked."
+        )
+    else:
+        ui.display_heading(f"All right! No leaked secrets found ({total} checked).")
+
+
+def _display_source_summary(counts: Dict[SourceType, int]) -> None:
+    """Display source type counts sorted by count descending."""
+    for source_type, count in sorted(counts.items(), key=lambda x: -x[1]):
+        label = SOURCE_LABELS.get(source_type, source_type.name)
+        ui.display_info(f"  {label}: {count}")
 
 
 def display_gathering_stats(stats: GatheringStats, json_output: bool = False) -> None:
@@ -75,10 +128,13 @@ def display_gathering_stats(stats: GatheringStats, json_output: bool = False) ->
 def display_scan_results(
     secrets: List[GatheredSecret],
     json_output: bool = False,
+    verbose: bool = False,
 ) -> None:
     """Display scan results summary."""
     if json_output:
         _display_json_results(secrets)
+    elif verbose:
+        _display_verbose_text_results(secrets)
     else:
         _display_text_results(secrets)
 
@@ -117,11 +173,53 @@ def _display_text_results(secrets: List[GatheredSecret]) -> None:
     if counts:
         ui.display_info("")
         ui.display_info("By source:")
-        for source_type, count in sorted(counts.items(), key=lambda x: -x[1]):
-            label = SOURCE_LABELS.get(source_type, source_type.name)
-            ui.display_info(f"  {label}: {count}")
+        _display_source_summary(counts)
 
     ui.display_info("")
+    ui.display_info("Use --check to verify if any secrets have been publicly exposed.")
+
+
+def _display_verbose_text_results(secrets: List[GatheredSecret]) -> None:
+    """Display verbose results with individual secrets grouped by source."""
+    counts = _group_by_source(secrets)
+
+    total = len(secrets)
+    ui.display_heading(f"Found {total} potential {pluralize('secret', total)}")
+
+    # Summary section
+    if counts:
+        ui.display_info("")
+        ui.display_info("── Summary ──")
+        _display_source_summary(counts)
+
+    # Details section - group by source type
+    ui.display_info("")
+    ui.display_info("── Details ──")
+
+    # Sort secrets by source type (same order as summary)
+    source_order = {
+        st: idx
+        for idx, st in enumerate(sorted(counts.keys(), key=lambda st: -counts[st]))
+    }
+    sorted_secrets = sorted(
+        secrets, key=lambda s: source_order.get(s.metadata.source_type, 999)
+    )
+
+    current_source = None
+    for i, secret in enumerate(sorted_secrets, 1):
+        metadata = secret.metadata
+
+        # Add section header when source type changes
+        if metadata.source_type != current_source:
+            current_source = metadata.source_type
+            label = SOURCE_LABELS.get(current_source, current_source.name)
+            ui.display_info("")
+            ui.display_info(f"  [{label}]")
+
+        ui.display_info(f"  {i}. {metadata.source_path}:{metadata.secret_name}")
+
+    ui.display_info("")
+    ui.display_info("Use --analyze to identify secret types and validity.")
     ui.display_info("Use --check to verify if any secrets have been publicly exposed.")
 
 
@@ -163,14 +261,12 @@ def display_analyzed_results(
 def _display_text_analyzed_results(result: AnalysisResult) -> None:
     """Display analysis results as summary text."""
     total = len(result.analyzed_secrets)
-    detected = result.detected_count
 
-    ui.display_heading(f"Analysis Results: {total} {pluralize('secret', total)} analyzed")
+    ui.display_heading(
+        f"Analysis Results: {total} {pluralize('secret', total)} analyzed"
+    )
 
-    if result.errors:
-        for error in result.errors:
-            ui.display_warning(f"  {error}")
-        ui.display_info("")
+    _display_errors(result.errors)
 
     if total == 0:
         ui.display_info("No secrets to analyze.")
@@ -180,28 +276,15 @@ def _display_text_analyzed_results(result: AnalysisResult) -> None:
     has_hmsl = any(s.hmsl_leaked is not None for s in result.analyzed_secrets)
     leaked_secrets = [s for s in result.analyzed_secrets if s.hmsl_leaked]
 
-    # Show counts by detector type
+    # Show counts by detector type (Unidentified always last)
     counts = result.get_counts_by_detector()
+
     if counts:
         ui.display_info("")
         ui.display_info("By detector type:")
-        for detector, stats in sorted(counts.items(), key=lambda x: -x[1]["count"]):
+        for detector, stats in sorted(counts.items(), key=_detector_sort_key):
             count = stats["count"]
-            valid = stats["valid"]
-            invalid = stats["invalid"]
-
-            # Build validity info
-            validity_parts = []
-            if valid > 0:
-                validity_parts.append(f"{valid} valid")
-            if invalid > 0:
-                validity_parts.append(f"{invalid} invalid")
-
-            if validity_parts:
-                validity_str = f" ({', '.join(validity_parts)})"
-            else:
-                validity_str = ""
-
+            validity_str = _build_validity_string(stats["valid"], stats["invalid"])
             ui.display_info(f"  {detector}: {count}{validity_str}")
 
     # Show known secrets count
@@ -210,21 +293,18 @@ def _display_text_analyzed_results(result: AnalysisResult) -> None:
         ui.display_info("")
         ui.display_info(f"Known secrets: {known} (already tracked in dashboard)")
 
-    # Show undetected count
-    undetected = total - detected
-    if undetected > 0:
-        ui.display_info("")
-        ui.display_info(f"Unidentified: {undetected} (not recognized as known secret types)")
-
     # Show leaked secrets if HMSL was run
     if has_hmsl:
         ui.display_info("")
         if leaked_secrets:
-            ui.display_warning(f"LEAKED SECRETS: {len(leaked_secrets)} (require immediate action!)")
+            ui.display_warning(
+                f"LEAKED SECRETS: {len(leaked_secrets)} (require immediate action!)"
+            )
             for secret in leaked_secrets:
                 metadata = secret.gathered_secret.metadata
-                detector = secret.detector_display_name or secret.detector_name or "Unknown"
-                ui.display_warning(f"  > {detector}: {metadata.source_path}:{metadata.secret_name}")
+                ui.display_warning(
+                    f"  > {secret.get_display_name()}: {metadata.source_path}:{metadata.secret_name}"
+                )
         else:
             ui.display_info("No leaked secrets found in public data.")
 
@@ -232,62 +312,90 @@ def _display_text_analyzed_results(result: AnalysisResult) -> None:
 
 
 def _display_verbose_analyzed_results(result: AnalysisResult) -> None:
-    """Display detailed per-secret analysis results."""
+    """Display detailed per-secret analysis results with summary."""
     total = len(result.analyzed_secrets)
-    ui.display_heading(f"Analysis Results: {total} {pluralize('secret', total)} analyzed")
 
-    if result.errors:
-        for error in result.errors:
-            ui.display_warning(f"  {error}")
-        ui.display_info("")
+    ui.display_heading(
+        f"Analysis Results: {total} {pluralize('secret', total)} analyzed"
+    )
+
+    _display_errors(result.errors)
 
     if total == 0:
         ui.display_info("No secrets to analyze.")
         return
 
+    # Check if we have HMSL results
+    has_hmsl = any(s.hmsl_leaked is not None for s in result.analyzed_secrets)
+    leaked_secrets = [s for s in result.analyzed_secrets if s.hmsl_leaked]
+
+    # ─── Summary Section ───
     ui.display_info("")
+    ui.display_info("── Summary ──")
 
-    for i, secret in enumerate(result.analyzed_secrets, 1):
+    # Show counts by detector type (Unidentified always last)
+    counts = result.get_counts_by_detector()
+
+    if counts:
+        for detector, stats in sorted(counts.items(), key=_detector_sort_key):
+            count = stats["count"]
+            validity_str = _build_validity_string(stats["valid"], stats["invalid"])
+            ui.display_info(f"  {detector}: {count}{validity_str}")
+
+    # Show known secrets count
+    known = result.known_secrets_count
+    if known > 0:
+        ui.display_info(f"  Known secrets: {known} (already tracked in dashboard)")
+
+    # Show leaked status
+    if has_hmsl:
+        if leaked_secrets:
+            ui.display_warning(
+                f"  LEAKED: {len(leaked_secrets)} secrets found in public data!"
+            )
+        else:
+            ui.display_info("  Leaked: None found in public data")
+
+    # ─── Details Section ───
+    ui.display_info("")
+    ui.display_info("── Details ──")
+
+    # Sort secrets by detector type in same order as summary (Unidentified last)
+    sorted_detectors = sorted(
+        counts.keys(), key=lambda d: (d == "Unidentified", -counts[d]["count"])
+    )
+    detector_order = {detector: idx for idx, detector in enumerate(sorted_detectors)}
+
+    sorted_secrets = sorted(
+        result.analyzed_secrets,
+        key=lambda s: detector_order.get(s.get_display_name(), 999),
+    )
+
+    current_detector = None
+    for i, secret in enumerate(sorted_secrets, 1):
         metadata = secret.gathered_secret.metadata
+        detector = secret.get_display_name()
 
-        # Header with detector, validity, and leaked status
-        if secret.is_detected:
-            detector = secret.detector_display_name or secret.detector_name or "Unknown"
-            validity = translate_validity(secret.validity).upper() if secret.validity else ""
-            if validity:
-                header = f"{i}. {detector} [{validity}]"
-            else:
-                header = f"{i}. {detector}"
+        # Add section header when detector type changes
+        if detector != current_detector:
+            current_detector = detector
+            ui.display_info("")
+            ui.display_info(f"  [{detector}]")
+
+        # Build compact line: number, validity, path:name, flags
+        if secret.is_detected and secret.validity:
+            validity = translate_validity(secret.validity).upper()
+            line = f"  {i}. [{validity}] {metadata.source_path}:{metadata.secret_name}"
         else:
-            header = f"{i}. Unidentified secret"
+            line = f"  {i}. {metadata.source_path}:{metadata.secret_name}"
 
-        # Add leaked warning if applicable
+        # Add flags
         if secret.hmsl_leaked:
-            header += " - LEAKED!"
-
-        ui.display_info(header)
-
-        # Location
-        location = f"{metadata.source_path}:{metadata.secret_name}"
-        ui.display_info(f"   Location: {location}")
-
-        # Known status
+            line += " - LEAKED!"
         if secret.known_secret:
-            if secret.incident_url:
-                ui.display_info(f"   Known: Yes - {secret.incident_url}")
-            else:
-                ui.display_info("   Known: Yes (tracked in dashboard)")
-        else:
-            ui.display_info("   Known: No")
+            line += " (known)"
 
-        # Leaked status if HMSL was run
-        if secret.hmsl_leaked is not None:
-            if secret.hmsl_leaked:
-                ui.display_warning("   Leaked: YES (found in public data)")
-            else:
-                ui.display_info("   Leaked: No")
-
-        ui.display_info("")
+        ui.display_info(line)
 
 
 def _display_json_analyzed_results(result: AnalysisResult) -> None:
@@ -300,7 +408,9 @@ def _build_analysis_json(result: AnalysisResult) -> Dict[str, Any]:
     """Build JSON representation of analysis results."""
     # Check if HMSL results are included
     has_hmsl = any(s.hmsl_leaked is not None for s in result.analyzed_secrets)
-    leaked_count = sum(1 for s in result.analyzed_secrets if s.hmsl_leaked) if has_hmsl else None
+    leaked_count = (
+        sum(1 for s in result.analyzed_secrets if s.hmsl_leaked) if has_hmsl else None
+    )
 
     secrets_data = []
     for secret in result.analyzed_secrets:
@@ -348,3 +458,130 @@ def _build_analysis_json(result: AnalysisResult) -> Dict[str, Any]:
         result_data["leaked_count"] = leaked_count
 
     return result_data
+
+
+# --------------------------------------------------------------------------
+# HMSL check-only output functions (for --check without --analyze)
+# --------------------------------------------------------------------------
+
+
+def display_hmsl_check_results(
+    secrets: List[GatheredSecret],
+    leaked_keys: set,
+    json_output: bool = False,
+    verbose: bool = False,
+) -> None:
+    """
+    Display HMSL check results for machine scan.
+
+    Args:
+        secrets: Original gathered secrets
+        leaked_keys: Set of keys (name + path) that were found leaked
+        json_output: If True, output JSON
+        verbose: If True, show per-secret details
+    """
+    if json_output:
+        _display_json_hmsl_results(secrets, leaked_keys)
+    elif verbose:
+        _display_verbose_hmsl_results(secrets, leaked_keys)
+    else:
+        _display_text_hmsl_results(secrets, leaked_keys)
+
+
+def _display_text_hmsl_results(
+    secrets: List[GatheredSecret],
+    leaked_keys: set,
+) -> None:
+    """Display HMSL check summary."""
+    total = len(secrets)
+    leaked_count = _count_leaked_secrets(secrets, leaked_keys)
+
+    _display_hmsl_header(leaked_count, total)
+
+    ui.display_info("")
+    ui.display_info("Use --verbose to see all checked secrets.")
+
+
+def _display_verbose_hmsl_results(
+    secrets: List[GatheredSecret],
+    leaked_keys: set,
+) -> None:
+    """Display verbose HMSL check results with per-secret details."""
+    total = len(secrets)
+
+    # Count by source type
+    counts = _group_by_source(secrets)
+    leaked_count = _count_leaked_secrets(secrets, leaked_keys)
+
+    _display_hmsl_header(leaked_count, total)
+
+    # Summary section
+    ui.display_info("")
+    ui.display_info("── Summary ──")
+    _display_source_summary(counts)
+
+    # Details section
+    ui.display_info("")
+    ui.display_info("── Details ──")
+
+    # Sort secrets by source type (same order as summary)
+    source_order = {
+        st: idx
+        for idx, st in enumerate(sorted(counts.keys(), key=lambda st: -counts[st]))
+    }
+    sorted_secrets = sorted(
+        secrets, key=lambda s: source_order.get(s.metadata.source_type, 999)
+    )
+
+    current_source = None
+    for i, secret in enumerate(sorted_secrets, 1):
+        metadata = secret.metadata
+
+        # Add section header when source type changes
+        if metadata.source_type != current_source:
+            current_source = metadata.source_type
+            label = SOURCE_LABELS.get(current_source, current_source.name)
+            ui.display_info("")
+            ui.display_info(f"  [{label}]")
+
+        # Check if leaked
+        key = f"{metadata.secret_name} ({metadata.source_path})"
+        is_leaked = key in leaked_keys
+
+        if is_leaked:
+            ui.display_warning(
+                f"  {i}. [LEAKED] {metadata.source_path}:{metadata.secret_name}"
+            )
+        else:
+            ui.display_info(
+                f"  {i}. [OK] {metadata.source_path}:{metadata.secret_name}"
+            )
+
+
+def _display_json_hmsl_results(
+    secrets: List[GatheredSecret],
+    leaked_keys: set,
+) -> None:
+    """Display HMSL check results as JSON."""
+    secrets_data = []
+    for secret in secrets:
+        metadata = secret.metadata
+        key = f"{metadata.secret_name} ({metadata.source_path})"
+        secrets_data.append(
+            {
+                "source": {
+                    "type": metadata.source_type.name,
+                    "path": metadata.source_path,
+                    "name": metadata.secret_name,
+                },
+                "leaked": key in leaked_keys,
+            }
+        )
+
+    leaked_count = sum(1 for s in secrets_data if s["leaked"])
+    data = {
+        "secrets_checked": len(secrets),
+        "leaked_count": leaked_count,
+        "secrets": secrets_data,
+    }
+    click.echo(json.dumps(data, indent=2))
