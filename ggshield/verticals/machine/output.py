@@ -152,12 +152,26 @@ def _display_json_results(secrets: List[GatheredSecret]) -> None:
     """Display results in JSON format."""
     counts = _group_by_source(secrets)
 
+    secrets_data = []
+    for secret in secrets:
+        metadata = secret.metadata
+        secrets_data.append(
+            {
+                "source_type": SOURCE_LABELS.get(
+                    metadata.source_type, metadata.source_type.name
+                ),
+                "source_path": metadata.source_path,
+                "secret_name": metadata.secret_name,
+            }
+        )
+
     data = {
         "secrets_found": len(secrets),
         "sources": {
             SOURCE_LABELS.get(source_type, source_type.name): count
             for source_type, count in counts.items()
         },
+        "secrets": secrets_data,
     }
 
     click.echo(json.dumps(data, indent=2))
@@ -176,7 +190,13 @@ def _display_text_results(secrets: List[GatheredSecret]) -> None:
         _display_source_summary(counts)
 
     ui.display_info("")
-    ui.display_info("Use --check to verify if any secrets have been publicly exposed.")
+    ui.display_info("Use -v, --verbose to see all secrets.")
+    ui.display_info(
+        "Use `ggshield machine check` to check for public leaks (sends hashes only, not secrets)."
+    )
+    ui.display_info(
+        "Use `ggshield machine analyze` for full analysis with GitGuardian API."
+    )
 
 
 def _display_verbose_text_results(secrets: List[GatheredSecret]) -> None:
@@ -219,12 +239,16 @@ def _display_verbose_text_results(secrets: List[GatheredSecret]) -> None:
         ui.display_info(f"  {i}. {metadata.source_path}:{metadata.secret_name}")
 
     ui.display_info("")
-    ui.display_info("Use --analyze to identify secret types and validity.")
-    ui.display_info("Use --check to verify if any secrets have been publicly exposed.")
+    ui.display_info(
+        "Use `ggshield machine check` to check for public leaks (sends hashes only, not secrets)."
+    )
+    ui.display_info(
+        "Use `ggshield machine analyze` for full analysis with GitGuardian API."
+    )
 
 
 # --------------------------------------------------------------------------
-# Analysis output functions (for --analyze flag)
+# Analysis output functions (for `machine analyze` command)
 # --------------------------------------------------------------------------
 
 
@@ -461,7 +485,7 @@ def _build_analysis_json(result: AnalysisResult) -> Dict[str, Any]:
 
 
 # --------------------------------------------------------------------------
-# HMSL check-only output functions (for --check without --analyze)
+# HMSL check-only output functions (for `machine check` command)
 # --------------------------------------------------------------------------
 
 
@@ -499,7 +523,10 @@ def _display_text_hmsl_results(
     _display_hmsl_header(leaked_count, total)
 
     ui.display_info("")
-    ui.display_info("Use --verbose to see all checked secrets.")
+    ui.display_info("Use -v, --verbose to see all checked secrets.")
+    ui.display_info(
+        "Use `ggshield machine analyze` for full analysis with GitGuardian API."
+    )
 
 
 def _display_verbose_hmsl_results(
@@ -556,6 +583,11 @@ def _display_verbose_hmsl_results(
             ui.display_info(
                 f"  {i}. [OK] {metadata.source_path}:{metadata.secret_name}"
             )
+
+    ui.display_info("")
+    ui.display_info(
+        "Use `ggshield machine analyze` for full analysis with GitGuardian API."
+    )
 
 
 def _display_json_hmsl_results(

@@ -141,6 +141,12 @@ class TestDisplayJsonResults:
         assert "Private keys" in data["sources"]
         assert data["sources"]["Environment variables"] == 1
         assert data["sources"]["Private keys"] == 1
+        # Check individual secrets are included
+        assert "secrets" in data
+        assert len(data["secrets"]) == 2
+        assert data["secrets"][0]["source_type"] == "Environment variables"
+        assert data["secrets"][0]["source_path"] == "env"
+        assert data["secrets"][0]["secret_name"] == "KEY"
 
     def test_json_output_empty_secrets(self, capsys):
         """
@@ -195,7 +201,7 @@ class TestDisplayTextResults:
         assert "By source:" in output
         assert "Environment variables" in output
         assert "Private keys" in output
-        assert "--check" in output
+        assert "machine check" in output
 
     def test_text_output_sorted_by_count(self, capsys):
         """

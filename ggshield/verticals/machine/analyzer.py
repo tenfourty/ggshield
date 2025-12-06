@@ -39,7 +39,7 @@ class AnalyzedSecret:
     known_secret: bool = False
     incident_url: Optional[str] = None
 
-    # For combined --analyze --check results
+    # HMSL leak status (set by `machine analyze` command)
     hmsl_leaked: Optional[bool] = None
 
     @property

@@ -4,7 +4,6 @@ Unit tests for MachineSecretAnalyzer.
 
 from unittest.mock import MagicMock, patch
 
-import pytest
 from pygitguardian.models import Match, MultiScanResult, PolicyBreak, ScanResult
 
 from ggshield.verticals.machine.analyzer import (

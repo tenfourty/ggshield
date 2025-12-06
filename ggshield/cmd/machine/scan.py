@@ -1,20 +1,19 @@
 """
-Machine scan command - scans local machine for secrets.
+Machine scan command - gathers secrets from the local machine.
+
+This command is the fastest option for getting an inventory of potential secrets.
+No network calls are made.
 """
 
 from __future__ import annotations
 
 import logging
 import sys
-from pathlib import Path
-from typing import TYPE_CHECKING, Any, List, Optional, Tuple
+from typing import Any, List, Optional, Tuple
 
 import click
 
-
-if TYPE_CHECKING:
-    from ggshield.verticals.machine.analyzer import AnalysisResult
-
+from ggshield.cmd.machine.common_options import machine_scan_options
 from ggshield.cmd.utils.common_options import (
     add_common_options,
     json_option,
@@ -25,15 +24,8 @@ from ggshield.core import ui
 from ggshield.core.errors import ExitCode
 from ggshield.core.filter import init_exclusion_regexes
 from ggshield.core.text_utils import pluralize
-from ggshield.verticals.hmsl.collection import (
-    NAMING_STRATEGIES,
-    SecretWithKey,
-    prepare,
-)
 from ggshield.verticals.machine.output import (
     SOURCE_LABELS,
-    display_analyzed_results,
-    display_hmsl_check_results,
     display_scan_results,
 )
 from ggshield.verticals.machine.secret_gatherer import (
@@ -161,68 +153,9 @@ class ScanProgressReporter:
 @add_common_options()
 @text_json_format_option
 @json_option
-@click.option(
-    "--analyze",
-    is_flag=True,
-    default=False,
-    help="Analyze secrets using GitGuardian API for type detection and validity.",
-)
-@click.option(
-    "--check",
-    is_flag=True,
-    default=False,
-    help="Check found secrets against HasMySecretLeaked API for public exposure.",
-)
-@click.option(
-    "-o",
-    "--output",
-    type=click.Path(dir_okay=False, writable=True, path_type=Path),
-    default=None,
-    help="Write detailed JSON results to file (requires --analyze).",
-)
-@click.option(
-    "-f",
-    "--full-hashes",
-    is_flag=True,
-    default=False,
-    help="Use full hashes when checking against HMSL (uses more credits but more accurate).",
-)
-@click.option(
-    "--timeout",
-    type=int,
-    default=60,
-    show_default=True,
-    help=(
-        "Maximum time in seconds for filesystem scanning. "
-        "Use 0 for unlimited. Fast sources (environment variables, "
-        "GitHub token) are always scanned regardless of timeout."
-    ),
-)
-@click.option(
-    "--min-chars",
-    type=int,
-    default=5,
-    show_default=True,
-    help="Minimum number of characters for a value to be considered a secret.",
-)
-@click.option(
-    "--exclude",
-    multiple=True,
-    help="Exclude paths matching this glob pattern. Can be specified multiple times.",
-    metavar="PATTERN",
-)
-@click.option(
-    "--ignore-config-exclusions",
-    is_flag=True,
-    default=False,
-    help="Don't apply ignored_paths from .gitguardian.yaml config files.",
-)
+@machine_scan_options
 def scan_cmd(
     ctx: click.Context,
-    analyze: bool,
-    check: bool,
-    output: Optional[Path],
-    full_hashes: bool,
     timeout: int,
     min_chars: int,
     exclude: Tuple[str, ...],
@@ -230,12 +163,16 @@ def scan_cmd(
     **kwargs: Any,
 ) -> int:
     """
-    Scan the local machine for secrets.
+    Scan the local machine for secrets (fast inventory, no network calls).
 
     Gathers potential secrets from environment variables, configuration files,
-    and private key files. Optionally analyzes secrets using the GitGuardian API
-    for type detection and validity, or checks if they have been publicly exposed
-    using GitGuardian's HasMySecretLeaked service.
+    and private key files. This is the fastest option for getting an inventory
+    of potential secrets on your machine.
+
+    \b
+    For more detailed analysis, use:
+      - `ggshield machine check` - Check for public leaks (sends hashes only)
+      - `ggshield machine analyze` - Full analysis with GitGuardian API
 
     \b
     Sources scanned:
@@ -247,12 +184,10 @@ def scan_cmd(
 
     \b
     Examples:
-      ggshield machine scan                      # Fast inventory only
-      ggshield machine scan --analyze            # Analyze with GitGuardian API
-      ggshield machine scan --analyze -v         # Verbose per-secret details
-      ggshield machine scan --analyze -o out.json  # Save detailed results
-      ggshield machine scan --check              # HMSL leak check
-      ggshield machine scan --analyze --check    # Both analysis and leak check
+      ggshield machine scan              # Fast inventory
+      ggshield machine scan --json       # JSON output
+      ggshield machine scan --timeout 30 # Limit scan time
+      ggshield machine scan -v           # Verbose output
     """
     ctx_obj = ContextObj.get(ctx)
 
@@ -298,175 +233,11 @@ def scan_cmd(
             "Use --timeout to increase the limit."
         )
 
-    # Validate options
-    if output and not analyze:
-        raise click.UsageError("--output requires --analyze flag")
-
     if not secrets:
         if not ctx_obj.use_json:
             ui.display_info("\nNo secrets found.")
         return ExitCode.SUCCESS
 
-    # If neither analyze nor check, just show inventory
-    if not analyze and not check:
-        display_scan_results(secrets, ctx_obj.use_json, verbose=ui.is_verbose())
-        return ExitCode.SUCCESS
-
-    # Handle --analyze (with optional --check)
-    if analyze:
-        return _run_analysis(
-            ctx=ctx,
-            secrets=secrets,
-            check=check,
-            full_hashes=full_hashes,
-            output_file=output,
-        )
-
-    # Handle --check only (no --analyze)
-    return _run_hmsl_check(
-        ctx=ctx,
-        secrets=secrets,
-        full_hashes=full_hashes,
-    )
-
-
-def _run_analysis(
-    ctx: click.Context,
-    secrets: List[GatheredSecret],
-    check: bool,
-    full_hashes: bool,
-    output_file: Optional[Path],
-) -> int:
-    """
-    Run GitGuardian API analysis on gathered secrets.
-
-    Optionally also run HMSL check if --check flag is set.
-    """
-    from ggshield.core.client import create_client_from_config
-    from ggshield.verticals.machine.analyzer import MachineSecretAnalyzer
-
-    ctx_obj = ContextObj.get(ctx)
-
-    ui.display_info(f"\nAnalyzing {len(secrets)} secrets with GitGuardian API...")
-
-    # Create client and analyzer
-    client = create_client_from_config(ctx_obj.config)
-    analyzer = MachineSecretAnalyzer(client)
-
-    # Run analysis
-    result = analyzer.analyze(secrets)
-
-    # If --check is also set, run HMSL check and merge results
-    if check:
-        _merge_hmsl_results(ctx, secrets, result, full_hashes)
-
-    # Display results
-    display_analyzed_results(
-        result,
-        json_output=ctx_obj.use_json,
-        verbose=ui.is_verbose(),
-        output_file=output_file,
-    )
-
-    # Return appropriate exit code
-    if result.detected_count > 0:
-        return ExitCode.SCAN_FOUND_PROBLEMS
-    return ExitCode.SUCCESS
-
-
-# --------------------------------------------------------------------------
-# HMSL helper functions
-# --------------------------------------------------------------------------
-
-
-def _prepare_secrets_for_hmsl(secrets: List[GatheredSecret]):
-    """Convert gathered secrets to HMSL format."""
-    secrets_with_keys = [
-        SecretWithKey(
-            key=f"{s.metadata.secret_name} ({s.metadata.source_path})",
-            value=s.value,
-        )
-        for s in secrets
-    ]
-    naming_strategy = NAMING_STRATEGIES["key"]
-    return prepare(secrets_with_keys, naming_strategy, full_hashes=True)
-
-
-def _extract_leaked_keys(found_secrets, prepared_data) -> set:
-    """Extract leaked secret keys from HMSL response."""
-    leaked_keys: set = set()
-    for secret in found_secrets:
-        name = prepared_data.mapping.get(secret.hash)
-        if name:
-            leaked_keys.add(name)
-    return leaked_keys
-
-
-def _merge_hmsl_results(
-    ctx: click.Context,
-    secrets: List[GatheredSecret],
-    result: AnalysisResult,
-    full_hashes: bool,
-) -> None:
-    """
-    Run HMSL check and merge leaked status into analysis results.
-    """
-    from ggshield.verticals.hmsl.client import HMSLClient
-    from ggshield.verticals.hmsl.utils import get_client
-
-    ui.display_info("Checking secrets against HasMySecretLeaked...")
-
-    prepared_data = _prepare_secrets_for_hmsl(secrets)
-
-    # Get HMSL client and check
-    ctx_obj = ContextObj.get(ctx)
-    hmsl_client: HMSLClient = get_client(ctx_obj.config, ctx.command_path)
-
-    # Query HMSL
-    found_secrets = hmsl_client.check(prepared_data.payload, full_hashes=full_hashes)
-    leaked_keys = _extract_leaked_keys(found_secrets, prepared_data)
-
-    # Merge into analysis results
-    for analyzed in result.analyzed_secrets:
-        metadata = analyzed.gathered_secret.metadata
-        key = f"{metadata.secret_name} ({metadata.source_path})"
-        analyzed.hmsl_leaked = key in leaked_keys
-
-    leaked_count = sum(1 for a in result.analyzed_secrets if a.hmsl_leaked)
-    if leaked_count > 0:
-        ui.display_warning(f"Found {leaked_count} leaked secrets!")
-
-
-def _run_hmsl_check(
-    ctx: click.Context,
-    secrets: List[GatheredSecret],
-    full_hashes: bool,
-) -> int:
-    """Run HMSL check only (no API analysis)."""
-    from ggshield.verticals.hmsl.client import HMSLClient
-    from ggshield.verticals.hmsl.utils import get_client
-
-    ui.display_info(f"\nChecking {len(secrets)} secrets against HasMySecretLeaked...")
-
-    prepared_data = _prepare_secrets_for_hmsl(secrets)
-
-    # Get HMSL client and check
-    ctx_obj = ContextObj.get(ctx)
-    hmsl_client: HMSLClient = get_client(ctx_obj.config, ctx.command_path)
-
-    # Query HMSL
-    found_secrets = hmsl_client.check(prepared_data.payload, full_hashes=full_hashes)
-    leaked_keys = _extract_leaked_keys(found_secrets, prepared_data)
-
-    # Display results
-    display_hmsl_check_results(
-        secrets,
-        leaked_keys,
-        json_output=ctx_obj.use_json,
-        verbose=ui.is_verbose(),
-    )
-
-    # Return appropriate exit code
-    if leaked_keys:
-        return ExitCode.SCAN_FOUND_PROBLEMS
+    # Display inventory results
+    display_scan_results(secrets, ctx_obj.use_json, verbose=ui.is_verbose())
     return ExitCode.SUCCESS

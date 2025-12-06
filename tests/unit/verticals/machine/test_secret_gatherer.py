@@ -4,7 +4,7 @@ Tests for MachineSecretGatherer.
 
 import os
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 from ggshield.core.filter import init_exclusion_regexes
 from ggshield.verticals.machine.secret_gatherer import (
@@ -12,7 +12,6 @@ from ggshield.verticals.machine.secret_gatherer import (
     GatheringStats,
     MachineSecretGatherer,
     SourceResult,
-    SourceStatus,
 )
 from ggshield.verticals.machine.sources import SourceType
 

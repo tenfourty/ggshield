@@ -1,12 +1,13 @@
 """
 Tests for machine scan command.
+
+This command gathers secrets from the local machine without any network calls.
+It's the fastest option for getting an inventory of potential secrets.
 """
 
-import json
 from unittest.mock import MagicMock, patch
 
 from click.testing import CliRunner
-from pygitguardian.models import Match, MultiScanResult, PolicyBreak, ScanResult
 
 from ggshield.__main__ import cli
 from ggshield.verticals.machine.secret_gatherer import GatheringStats
@@ -15,7 +16,7 @@ from ggshield.verticals.machine.sources import (
     SecretMetadata,
     SourceType,
 )
-from tests.unit.conftest import assert_invoke_ok, assert_invoke_exited_with
+from tests.unit.conftest import assert_invoke_ok
 
 
 class TestMachineScanCommand:
@@ -43,7 +44,7 @@ class TestMachineScanCommand:
     def test_scan_finds_secrets(self, cli_fs_runner: CliRunner):
         """
         GIVEN secrets found on the machine
-        WHEN running machine scan without --check
+        WHEN running machine scan
         THEN displays the secrets summary by source type
         """
         mock_secrets = [
@@ -197,27 +198,6 @@ class TestMachineScanCommand:
         assert '"secrets_found": 1' in result.output
         assert "Environment variables" in result.output
 
-    def test_scan_with_check_no_secrets(self, cli_fs_runner: CliRunner):
-        """
-        GIVEN no secrets to gather
-        WHEN running machine scan with --check
-        THEN succeeds without calling HMSL
-        """
-        mock_gatherer = MagicMock()
-        mock_gatherer.gather.return_value = iter([])
-        mock_gatherer.stats = GatheringStats()
-
-        with patch(
-            "ggshield.cmd.machine.scan.MachineSecretGatherer",
-            return_value=mock_gatherer,
-        ):
-            with patch("ggshield.cmd.hmsl.hmsl_utils.check_secrets") as mock_check:
-                result = cli_fs_runner.invoke(cli, ["machine", "scan", "--check"])
-
-        assert_invoke_ok(result)
-        # Should not call check_secrets since no secrets were found
-        mock_check.assert_not_called()
-
     def test_scan_timed_out_flag(self, cli_fs_runner: CliRunner):
         """
         GIVEN gathering that timed out
@@ -247,18 +227,22 @@ class TestMachineScanCommand:
         """
         GIVEN the machine scan command
         WHEN running with --help
-        THEN displays help text with all options
+        THEN displays help text with scan-only options
         """
         result = cli_fs_runner.invoke(cli, ["machine", "scan", "--help"])
 
         assert_invoke_ok(result)
-        assert "--check" in result.output
         assert "--timeout" in result.output
         assert "--min-chars" in result.output
-        assert "--full-hashes" in result.output
         assert "--exclude" in result.output
         assert "--ignore-config-exclusions" in result.output
-        assert "HasMySecretLeaked" in result.output
+        # These should NOT be present as command flags (moved to check/analyze commands)
+        # Use specific patterns to avoid matching global options like --check-for-updates
+        assert "  --check " not in result.output  # space after to match flag format
+        assert "--analyze" not in result.output
+        assert "--full-hashes" not in result.output
+        # --output could match other things, be more specific
+        assert "  -o," not in result.output  # the short form of --output
 
     def test_scan_with_exclude_option(self, cli_fs_runner: CliRunner):
         """
@@ -377,396 +361,11 @@ class TestMachineScanCommand:
         """
         GIVEN the machine command group
         WHEN running machine --help
-        THEN displays scan subcommand
+        THEN displays scan, check, and analyze subcommands
         """
         result = cli_fs_runner.invoke(cli, ["machine", "--help"])
 
         assert_invoke_ok(result)
         assert "scan" in result.output
-
-
-def _make_policy_break(
-    detector_name: str = "generic_api_key",
-    break_type: str = "Generic API Key",
-    validity: str = "valid",
-    known_secret: bool = False,
-) -> PolicyBreak:
-    """Create a test PolicyBreak."""
-    return PolicyBreak(
-        break_type=break_type,
-        policy="Secrets detection",
-        detector_name=detector_name,
-        detector_group_name=break_type,
-        validity=validity,
-        known_secret=known_secret,
-        incident_url=None,
-        is_excluded=False,
-        is_vaulted=False,
-        exclude_reason=None,
-        diff_kind=None,
-        matches=[
-            Match(
-                match="secret_value",
-                match_type="api_key",
-                index_start=0,
-                index_end=12,
-                line_start=0,
-                line_end=0,
-            )
-        ],
-    )
-
-
-def _make_scan_result(policy_breaks: list = None) -> ScanResult:
-    """Create a test ScanResult."""
-    if policy_breaks is None:
-        policy_breaks = []
-    return ScanResult(
-        policy_break_count=len(policy_breaks),
-        policy_breaks=policy_breaks,
-        policies=["Secrets detection"],
-    )
-
-
-class TestMachineScanAnalyze:
-    """Tests for machine scan --analyze command."""
-
-    def test_scan_analyze_no_secrets(self, cli_fs_runner: CliRunner):
-        """
-        GIVEN no secrets to gather
-        WHEN running machine scan --analyze
-        THEN displays no secrets found message without calling API
-        """
-        mock_gatherer = MagicMock()
-        mock_gatherer.gather.return_value = iter([])
-        mock_gatherer.stats = GatheringStats()
-
-        with patch(
-            "ggshield.cmd.machine.scan.MachineSecretGatherer",
-            return_value=mock_gatherer,
-        ):
-            with patch("ggshield.core.client.create_client_from_config") as mock_client:
-                result = cli_fs_runner.invoke(cli, ["machine", "scan", "--analyze"])
-
-        assert_invoke_ok(result)
-        assert "No secrets found" in result.output
-        mock_client.assert_not_called()
-
-    def test_scan_analyze_with_secrets(self, cli_fs_runner: CliRunner):
-        """
-        GIVEN secrets found on the machine
-        WHEN running machine scan --analyze
-        THEN analyzes secrets and displays results by detector type
-        """
-        mock_secrets = [
-            GatheredSecret(
-                value="AKIAIOSFODNN7EXAMPLE",
-                metadata=SecretMetadata(
-                    source_type=SourceType.ENVIRONMENT_VAR,
-                    source_path="environment",
-                    secret_name="AWS_ACCESS_KEY_ID",
-                ),
-            ),
-        ]
-        mock_gatherer = MagicMock()
-        mock_gatherer.gather.return_value = iter(mock_secrets)
-        mock_gatherer.stats = GatheringStats(env_vars_count=1)
-
-        mock_client = MagicMock()
-        mock_client.multi_content_scan.return_value = MultiScanResult(
-            scan_results=[
-                _make_scan_result(
-                    [
-                        _make_policy_break(
-                            detector_name="aws_access_key",
-                            break_type="AWS Keys",
-                            validity="valid",
-                        )
-                    ]
-                )
-            ]
-        )
-
-        with patch(
-            "ggshield.cmd.machine.scan.MachineSecretGatherer",
-            return_value=mock_gatherer,
-        ):
-            with patch(
-                "ggshield.core.client.create_client_from_config",
-                return_value=mock_client,
-            ):
-                with patch("ggshield.verticals.machine.analyzer.check_client_api_key"):
-                    result = cli_fs_runner.invoke(cli, ["machine", "scan", "--analyze"])
-
-        # Should return exit code 1 (found problems) when secrets detected
-        assert_invoke_exited_with(result, 1)
-        assert "Analysis Results" in result.output
-        assert "AWS Keys" in result.output
-
-    def test_scan_analyze_json_output(self, cli_fs_runner: CliRunner):
-        """
-        GIVEN secrets found on the machine
-        WHEN running machine scan --analyze --json
-        THEN outputs valid JSON with detector information
-        """
-        mock_secrets = [
-            GatheredSecret(
-                value="test_secret",
-                metadata=SecretMetadata(
-                    source_type=SourceType.ENVIRONMENT_VAR,
-                    source_path="environment",
-                    secret_name="API_KEY",
-                ),
-            ),
-        ]
-        mock_gatherer = MagicMock()
-        mock_gatherer.gather.return_value = iter(mock_secrets)
-        mock_gatherer.stats = GatheringStats(env_vars_count=1)
-
-        mock_client = MagicMock()
-        mock_client.multi_content_scan.return_value = MultiScanResult(
-            scan_results=[
-                _make_scan_result(
-                    [
-                        _make_policy_break(
-                            detector_name="generic_api_key",
-                            break_type="Generic API Key",
-                        )
-                    ]
-                )
-            ]
-        )
-
-        with patch(
-            "ggshield.cmd.machine.scan.MachineSecretGatherer",
-            return_value=mock_gatherer,
-        ):
-            with patch(
-                "ggshield.core.client.create_client_from_config",
-                return_value=mock_client,
-            ):
-                with patch("ggshield.verticals.machine.analyzer.check_client_api_key"):
-                    result = cli_fs_runner.invoke(
-                        cli, ["machine", "scan", "--analyze", "--json"]
-                    )
-
-        # Parse JSON output - may have extra info messages before the JSON
-        # Find the JSON by looking for the opening brace
-        output_lines = result.output.strip().split("\n")
-        json_start = next(
-            (i for i, line in enumerate(output_lines) if line.strip().startswith("{")),
-            0,
-        )
-        json_output = "\n".join(output_lines[json_start:])
-        output_data = json.loads(json_output)
-        assert "secrets_analyzed" in output_data
-        assert output_data["secrets_analyzed"] == 1
-        assert "by_detector" in output_data
-        assert "Generic API Key" in output_data["by_detector"]
-        # Verify GIM-compatible fields
-        assert "fetched_at" in output_data
-        assert "T" in output_data["fetched_at"]  # ISO format
-        assert len(output_data["secrets"]) == 1
-        secret = output_data["secrets"][0]
-        assert "gim" in secret
-        assert "kind" in secret["gim"]
-        assert secret["gim"]["kind"]["type"] == "string"
-        assert "raw" in secret["gim"]["kind"]
-        assert "hash" in secret["gim"]["kind"]["raw"]
-        assert len(secret["gim"]["kind"]["raw"]["hash"]) == 64  # scrypt hash
-        assert "length" in secret["gim"]["kind"]["raw"]
-        assert isinstance(secret["gim"]["kind"]["raw"]["length"], int)
-        assert "sub_path" in secret["gim"]
-
-    def test_scan_analyze_output_file(self, cli_fs_runner: CliRunner, tmp_path):
-        """
-        GIVEN secrets found on the machine
-        WHEN running machine scan --analyze --output file.json
-        THEN writes detailed JSON to file
-        """
-        output_file = tmp_path / "results.json"
-
-        mock_secrets = [
-            GatheredSecret(
-                value="test_secret",
-                metadata=SecretMetadata(
-                    source_type=SourceType.ENVIRONMENT_VAR,
-                    source_path="environment",
-                    secret_name="API_KEY",
-                ),
-            ),
-        ]
-        mock_gatherer = MagicMock()
-        mock_gatherer.gather.return_value = iter(mock_secrets)
-        mock_gatherer.stats = GatheringStats(env_vars_count=1)
-
-        mock_client = MagicMock()
-        mock_client.multi_content_scan.return_value = MultiScanResult(
-            scan_results=[_make_scan_result([_make_policy_break()])]
-        )
-
-        with patch(
-            "ggshield.cmd.machine.scan.MachineSecretGatherer",
-            return_value=mock_gatherer,
-        ):
-            with patch(
-                "ggshield.core.client.create_client_from_config",
-                return_value=mock_client,
-            ):
-                with patch("ggshield.verticals.machine.analyzer.check_client_api_key"):
-                    result = cli_fs_runner.invoke(
-                        cli,
-                        ["machine", "scan", "--analyze", "--output", str(output_file)],
-                    )
-
-        # File should be created with JSON content
-        assert output_file.exists()
-        file_content = json.loads(output_file.read_text())
-        assert "secrets_analyzed" in file_content
-        assert "secrets" in file_content
-        assert f"Detailed results written to {output_file}" in result.output
-        # Verify GIM-compatible fields in file output
-        assert "fetched_at" in file_content
-        assert len(file_content["secrets"]) == 1
-        secret = file_content["secrets"][0]
-        assert "gim" in secret
-        assert secret["gim"]["kind"]["type"] == "string"
-        assert len(secret["gim"]["kind"]["raw"]["hash"]) == 64
-
-    def test_scan_output_requires_analyze(self, cli_fs_runner: CliRunner, tmp_path):
-        """
-        GIVEN --output flag without --analyze
-        WHEN running machine scan --output file.json
-        THEN fails with usage error
-        """
-        output_file = tmp_path / "results.json"
-
-        mock_gatherer = MagicMock()
-        mock_gatherer.gather.return_value = iter(
-            [
-                GatheredSecret(
-                    value="test",
-                    metadata=SecretMetadata(
-                        source_type=SourceType.ENVIRONMENT_VAR,
-                        source_path="env",
-                        secret_name="KEY",
-                    ),
-                )
-            ]
-        )
-        mock_gatherer.stats = GatheringStats()
-
-        with patch(
-            "ggshield.cmd.machine.scan.MachineSecretGatherer",
-            return_value=mock_gatherer,
-        ):
-            result = cli_fs_runner.invoke(
-                cli, ["machine", "scan", "--output", str(output_file)]
-            )
-
-        assert result.exit_code == 2
-        assert "--output requires --analyze" in result.output
-
-    def test_scan_help_includes_analyze(self, cli_fs_runner: CliRunner):
-        """
-        GIVEN the machine scan command
-        WHEN running with --help
-        THEN displays --analyze option
-        """
-        result = cli_fs_runner.invoke(cli, ["machine", "scan", "--help"])
-
-        assert_invoke_ok(result)
-        assert "--analyze" in result.output
-        assert "--output" in result.output
-        assert "GitGuardian API" in result.output
-
-    def test_scan_analyze_with_check(self, cli_fs_runner: CliRunner):
-        """
-        GIVEN secrets found on the machine
-        WHEN running machine scan --analyze --check
-        THEN analyzes secrets AND checks against HMSL with full hashes
-        """
-        mock_secrets = [
-            GatheredSecret(
-                value="AKIAIOSFODNN7EXAMPLE",
-                metadata=SecretMetadata(
-                    source_type=SourceType.ENVIRONMENT_VAR,
-                    source_path="environment",
-                    secret_name="AWS_ACCESS_KEY_ID",
-                ),
-            ),
-        ]
-        mock_gatherer = MagicMock()
-        mock_gatherer.gather.return_value = iter(mock_secrets)
-        mock_gatherer.stats = GatheringStats(env_vars_count=1)
-
-        # Mock the scanning API client
-        mock_client = MagicMock()
-        mock_client.multi_content_scan.return_value = MultiScanResult(
-            scan_results=[
-                _make_scan_result(
-                    [
-                        _make_policy_break(
-                            detector_name="aws_access_key",
-                            break_type="AWS Keys",
-                            validity="valid",
-                        )
-                    ]
-                )
-            ]
-        )
-
-        # Mock the HMSL client - return a leaked secret to test the full flow
-        # The Secret class has 'hash', 'count', 'url' attributes (NOT 'name')
-        from ggshield.verticals.hmsl.client import Secret as HMSLSecret
-        from ggshield.verticals.hmsl.crypto import hash_string
-
-        # Compute the actual hash that prepare() will generate for our test secret
-        expected_hash = hash_string("AKIAIOSFODNN7EXAMPLE")
-
-        mock_hmsl_client = MagicMock()
-        mock_hmsl_client.check.return_value = [
-            HMSLSecret(hash=expected_hash, count=1, url="https://example.com/leak")
-        ]
-
-        with patch(
-            "ggshield.cmd.machine.scan.MachineSecretGatherer",
-            return_value=mock_gatherer,
-        ):
-            with patch(
-                "ggshield.core.client.create_client_from_config",
-                return_value=mock_client,
-            ):
-                with patch("ggshield.verticals.machine.analyzer.check_client_api_key"):
-                    with patch(
-                        "ggshield.verticals.hmsl.utils.get_client",
-                        return_value=mock_hmsl_client,
-                    ):
-                        result = cli_fs_runner.invoke(
-                            cli, ["machine", "scan", "--analyze", "--check"]
-                        )
-
-        # Should call both APIs
-        mock_client.multi_content_scan.assert_called_once()
-        mock_hmsl_client.check.assert_called_once()
-
-        # Verify the payload passed to client.check() contains full 64-char hashes
-        # NOT 5-char prefixes. This is the actual behavior we need to guarantee.
-        check_call_args = mock_hmsl_client.check.call_args
-        payload = check_call_args[0][0]  # First positional arg is the hashes
-        for hash_value in payload:
-            assert len(hash_value) == 64, (
-                f"Expected full 64-char hash but got {len(hash_value)}-char value: "
-                f"'{hash_value[:10]}...'. client.check() needs full hashes to compute hints."
-            )
-            # Verify it's valid hex
-            assert all(
-                c in "0123456789abcdef" for c in hash_value
-            ), f"Hash contains non-hex characters: '{hash_value[:10]}...'"
-
-        # Should return exit code 1 (found problems) when secrets detected
-        assert_invoke_exited_with(result, 1)
-        assert "Analysis Results" in result.output
-        assert "AWS Keys" in result.output
-        # Should show leaked warning since we returned a leaked secret
-        assert "leaked" in result.output.lower()
+        assert "check" in result.output
+        assert "analyze" in result.output
