@@ -37,7 +37,7 @@ def machine_scan_options(f: F) -> F:
         "--exclude",
         multiple=True,
         help="Exclude paths matching this glob pattern. Can be specified multiple times.",
-        metavar="PATTERN",
+        metavar="PATTERNS",
     )
     @click.option(
         "--ignore-config-exclusions",
