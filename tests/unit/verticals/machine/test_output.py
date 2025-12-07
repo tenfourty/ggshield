@@ -198,7 +198,7 @@ class TestDisplayTextResults:
         captured = capsys.readouterr()
         output = captured.out + captured.err  # ui module writes to stderr
         assert "Found 2 potential secrets" in output
-        assert "By source:" in output
+        assert "── Summary ──" in output
         assert "Environment variables" in output
         assert "Private keys" in output
         assert "machine check" in output

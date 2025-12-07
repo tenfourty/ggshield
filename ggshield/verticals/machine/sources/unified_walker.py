@@ -8,28 +8,115 @@ to multiple FileMatcher implementations, eliminating duplicate filesystem scans.
 import os
 import time
 from dataclasses import dataclass, field
+from functools import lru_cache
 from pathlib import Path
 from typing import Callable, Dict, Iterator, List, Optional, Pattern, Set
 
+from ggshield.core.filter import init_exclusion_regexes
+from ggshield.utils.files import is_path_excluded
 from ggshield.verticals.machine.sources import GatheredSecret, SourceType
 from ggshield.verticals.machine.sources.file_matcher import FileMatcher
 
 
-# Directories to skip during traversal (common to all matchers)
-SKIP_DIRECTORIES = {
-    "node_modules",
-    "__pycache__",
+# Directories to ignore during traversal (ignore-list approach for comprehensive scanning)
+IGNORED_DIRECTORIES = {
+    # Version control
     ".git",
     ".hg",
     ".svn",
-    ".cache",
+    # Package managers / dependencies
+    "node_modules",
+    ".npm",
+    ".yarn",
+    ".pnpm-store",
+    # Python
+    "__pycache__",
     ".venv",
     "venv",
     ".tox",
+    ".eggs",
+    ".mypy_cache",
+    ".pytest_cache",
+    ".ruff_cache",
+    # Build outputs
     "dist",
     "build",
     "target",
+    "_build",
+    # Caches (typically large, low value)
+    ".cache",
+    ".local/share/Trash",
+    ".Trash",
+    "Library/Caches",
+    # Application caches with low credential value
+    ".gradle/caches",
+    ".m2/repository",
+    ".cargo/registry",
+    ".rustup",
+    # IDE/editor state
+    ".idea",
+    ".vscode",
+    ".vs",
+    # Logs
+    "logs",
+    ".logs",
 }
+
+# Path patterns to exclude (matched against full path)
+# These are converted to regexes and applied in addition to user-provided exclusions.
+# IMPORTANT: Patterns ending with "/" match as prefixes (no $ anchor), allowing them
+# to match all files under that path. Patterns ending with "**" don't work correctly
+# because translate_user_pattern() converts them to ([^/]+)([^/]+) which only matches
+# exactly 2 path segments.
+DEFAULT_EXCLUSION_PATTERNS = {
+    # Apple Wallet passes (any OS) - authenticationToken is provider-generated,
+    # not a user credential. Used for pass updates, not account access.
+    "**/*.pkpass/",
+    # App update framework caches (macOS)
+    "**/org.sparkle-project.Sparkle/",
+    # Package manager caches and source directories
+    "**/.bun/install/cache/",
+    # Rust crate source cache - extracted third-party crate sources
+    # See: https://doc.rust-lang.org/cargo/guide/cargo-home.html
+    "**/.cargo/registry/src/",
+    # Python installed packages - third-party libs that may contain test data
+    # See: https://docs.python.org/3/library/site.html
+    "**/site-packages/",
+    # Test directories - contain test fixtures, not real secrets
+    "**/tests/",
+    # SDKs with example/test data
+    "**/google-cloud-sdk/",
+    # Files handled by dedicated sources (avoid duplicate detection in deep scan)
+    # These sources extract specific tokens; deep scan would find generic entropy
+    "**/.config/raycast/config.json",
+    "**/.config/joplin-desktop/settings.json",
+    "**/.factory/auth.json",
+    "**/.gemini/oauth_creds.json",
+    # Claude Code app preferences - contains session IDs, not credentials
+    "**/.claude.json",
+    # AMP IDE local session tokens - auto-generated per workspace, local-only
+    "**/.local/share/amp/ide/",
+    # Chromium-based browser extension declarativeNetRequest rules - extension config, not credentials
+    # Applies to Chrome, Edge, Brave, Comet, Arc, and other Chromium browsers
+    # See: https://developer.chrome.com/docs/extensions/reference/api/declarativeNetRequest
+    "**/DNR Extension Rules/",
+    # Apple iCloud/CloudKit sync data - binary plists, not user credentials
+    "**/group.com.apple.stocks/",
+    "**/com.apple.siri.findmy/",
+    # 1Password internal settings - high-entropy app config, not user secrets
+    # 2BUA8C4S2C is AgileBits' Apple Team ID, same for all 1Password users
+    "**/2BUA8C4S2C.com.1password/",
+    # Firefox addons.json - contains addon metadata (names, versions, store URLs), not credentials
+    # amoListingURL field triggers false positive "Generic Password" detection
+    "**/Firefox/Profiles/*/addons.json",
+}
+
+
+@lru_cache(maxsize=1)
+def get_default_exclusion_regexes() -> frozenset:
+    """Get compiled regex patterns for default exclusions (cached)."""
+    return frozenset(init_exclusion_regexes(DEFAULT_EXCLUSION_PATTERNS))
+
 
 # Progress update interval in seconds
 PROGRESS_INTERVAL_SECONDS = 0.2
@@ -47,6 +134,24 @@ class WalkerStats:
 # Type for progress callback: (files_visited, matches_by_type) -> None
 WalkerProgressCallback = Callable[[int, Dict[SourceType, int]], None]
 
+# Type for candidate file callback: (file_path) -> None
+CandidateFileCallback = Callable[[Path], None]
+
+# File extensions that are candidates for deep scan (text-based config files)
+DEEP_SCAN_EXTENSIONS = frozenset(
+    {
+        ".json",
+        ".yaml",
+        ".yml",
+        ".toml",
+        ".ini",
+        ".conf",
+        ".cfg",
+        ".properties",
+        ".xml",
+    }
+)
+
 
 @dataclass
 class WalkerConfig:
@@ -57,6 +162,8 @@ class WalkerConfig:
     is_timed_out: Callable[[], bool]
     exclusion_regexes: Set[Pattern[str]] = field(default_factory=set)
     on_progress: Optional[WalkerProgressCallback] = None
+    # Callback for collecting files for deep scan (API-based scanning)
+    on_candidate_file: Optional[CandidateFileCallback] = None
 
 
 class UnifiedFileSystemWalker:
@@ -77,10 +184,9 @@ class UnifiedFileSystemWalker:
         self._stats = WalkerStats()
         self._last_progress_time = 0.0
 
-        # Pre-compute union of allowed dot directories from all matchers
-        self._allowed_dot_dirs: Set[str] = set()
-        for matcher in config.matchers:
-            self._allowed_dot_dirs.update(matcher.allowed_dot_directories)
+        # Merge default exclusions with user-provided ones
+        self._all_exclusion_regexes: Set[Pattern[str]] = set(config.exclusion_regexes)
+        self._all_exclusion_regexes.update(get_default_exclusion_regexes())
 
         # Initialize match counts for each matcher's source type
         for matcher in config.matchers:
@@ -112,6 +218,8 @@ class UnifiedFileSystemWalker:
 
             # Process files with string-based matching first (PERF: no Path creation)
             for filename in files:
+                matched = False
+
                 # Find first matcher that matches this filename
                 for matcher in self.config.matchers:
                     if matcher.matches_filename(filename):
@@ -122,7 +230,7 @@ class UnifiedFileSystemWalker:
                         # Track secrets count separately from file matches
                         secrets_from_file = 0
                         for secret in matcher.extract_secrets(
-                            file_path, self.config.exclusion_regexes
+                            file_path, self._all_exclusion_regexes
                         ):
                             secrets_from_file += 1
                             self._stats.secrets_by_type[matcher.source_type] += 1
@@ -133,7 +241,17 @@ class UnifiedFileSystemWalker:
                             self._stats.matches_by_type[matcher.source_type] += 1
 
                         # First matcher wins (no double-extraction)
+                        matched = True
                         break
+
+                # If not matched by dedicated matchers, check for deep scan candidate
+                if not matched and self.config.on_candidate_file is not None:
+                    suffix = Path(filename).suffix.lower()
+                    if suffix in DEEP_SCAN_EXTENSIONS:
+                        file_path = Path(root) / filename
+                        # Apply exclusion patterns to deep scan candidates
+                        if not is_path_excluded(file_path, self._all_exclusion_regexes):
+                            self.config.on_candidate_file(file_path)
 
     def _prune_directories(self, dirs: List[str]) -> None:
         """
@@ -141,20 +259,16 @@ class UnifiedFileSystemWalker:
 
         Modifies dirs in-place to prevent os.walk from descending
         into unwanted directories.
+
+        Uses an ignore-list approach - all directories are scanned EXCEPT those
+        explicitly listed in IGNORED_DIRECTORIES. This ensures comprehensive
+        coverage of hidden directories that may contain credentials.
         """
         indices_to_remove = []
 
         for i, dirname in enumerate(dirs):
-            if dirname in SKIP_DIRECTORIES:
+            if dirname in IGNORED_DIRECTORIES:
                 indices_to_remove.append(i)
-            elif dirname.startswith("."):
-                # Skip hidden dirs except allowed ones
-                # Check if dirname matches or starts with any allowed directory
-                if not any(
-                    dirname == allowed or dirname.startswith(allowed)
-                    for allowed in self._allowed_dot_dirs
-                ):
-                    indices_to_remove.append(i)
 
         # Remove in reverse order to preserve indices
         for i in reversed(indices_to_remove):

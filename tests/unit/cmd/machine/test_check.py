@@ -69,7 +69,7 @@ class TestMachineCheckCommand:
         ):
             with patch(
                 "ggshield.cmd.machine.check.check_secrets",
-                return_value=(set(), MagicMock()),
+                return_value=({}, MagicMock()),  # Empty dict instead of set
             ) as mock_hmsl:
                 result = cli_fs_runner.invoke(cli, ["machine", "check"])
 
@@ -102,7 +102,7 @@ class TestMachineCheckCommand:
         ):
             with patch(
                 "ggshield.cmd.machine.check.check_secrets",
-                return_value=(set(), MagicMock()),
+                return_value=({}, MagicMock()),  # Empty dict instead of set
             ) as mock_hmsl:
                 result = cli_fs_runner.invoke(
                     cli, ["machine", "check", "--full-hashes"]
@@ -222,7 +222,7 @@ class TestMachineCheckCommand:
         ):
             with patch(
                 "ggshield.cmd.machine.check.check_secrets",
-                return_value=(set(), MagicMock()),
+                return_value=({}, MagicMock()),  # Empty dict instead of set
             ):
                 result = cli_fs_runner.invoke(cli, ["machine", "check", "--json"])
 
@@ -257,7 +257,7 @@ class TestMachineCheckCommand:
         ):
             with patch(
                 "ggshield.cmd.machine.check.check_secrets",
-                return_value=(set(), MagicMock()),
+                return_value=({}, MagicMock()),  # Empty dict instead of set
             ) as mock_hmsl:
                 result = cli_fs_runner.invoke(cli, ["machine", "check"])
 

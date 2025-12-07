@@ -71,22 +71,29 @@ class TestMachineAnalyzeCommand:
         """
         GIVEN no secrets to gather
         WHEN running machine analyze
-        THEN displays no secrets found message without calling APIs
+        THEN displays no secrets found message without analyzing
         """
         mock_gatherer = MagicMock()
         mock_gatherer.gather.return_value = iter([])
         mock_gatherer.stats = GatheringStats()
 
+        mock_client = MagicMock()
+
         with patch(
             "ggshield.cmd.machine.analyze.MachineSecretGatherer",
             return_value=mock_gatherer,
         ):
-            with patch("ggshield.core.client.create_client_from_config") as mock_client:
+            with patch(
+                "ggshield.core.client.create_client_from_config",
+                return_value=mock_client,
+            ):
                 result = cli_fs_runner.invoke(cli, ["machine", "analyze"])
 
         assert_invoke_ok(result)
         assert "No secrets found" in result.output
-        mock_client.assert_not_called()
+        # Client is created early (to support --deep mode) but multi_content_scan
+        # should not be called when no secrets are found
+        mock_client.multi_content_scan.assert_not_called()
 
     def test_analyze_with_secrets(self, cli_fs_runner: CliRunner):
         """
@@ -132,7 +139,9 @@ class TestMachineAnalyzeCommand:
                 return_value=mock_client,
             ):
                 with patch("ggshield.verticals.machine.analyzer.check_client_api_key"):
-                    with patch("ggshield.cmd.machine.analyze.check_leaks"):
+                    with patch(
+                        "ggshield.cmd.machine.analyze.check_leaks", return_value={}
+                    ):
                         result = cli_fs_runner.invoke(cli, ["machine", "analyze"])
 
         # Should return exit code 1 (found problems) when secrets detected
@@ -176,7 +185,9 @@ class TestMachineAnalyzeCommand:
                 return_value=mock_client,
             ):
                 with patch("ggshield.verticals.machine.analyzer.check_client_api_key"):
-                    with patch("ggshield.cmd.machine.analyze.check_leaks") as mock_hmsl:
+                    with patch(
+                        "ggshield.cmd.machine.analyze.check_leaks", return_value={}
+                    ) as mock_hmsl:
                         cli_fs_runner.invoke(cli, ["machine", "analyze"])
 
         # HMSL check should have been called
@@ -225,7 +236,9 @@ class TestMachineAnalyzeCommand:
                 return_value=mock_client,
             ):
                 with patch("ggshield.verticals.machine.analyzer.check_client_api_key"):
-                    with patch("ggshield.cmd.machine.analyze.check_leaks"):
+                    with patch(
+                        "ggshield.cmd.machine.analyze.check_leaks", return_value={}
+                    ):
                         result = cli_fs_runner.invoke(
                             cli, ["machine", "analyze", "--json"]
                         )
@@ -295,7 +308,9 @@ class TestMachineAnalyzeCommand:
                 return_value=mock_client,
             ):
                 with patch("ggshield.verticals.machine.analyzer.check_client_api_key"):
-                    with patch("ggshield.cmd.machine.analyze.check_leaks"):
+                    with patch(
+                        "ggshield.cmd.machine.analyze.check_leaks", return_value={}
+                    ):
                         result = cli_fs_runner.invoke(
                             cli,
                             ["machine", "analyze", "--output", str(output_file)],
@@ -350,7 +365,9 @@ class TestMachineAnalyzeCommand:
                 return_value=mock_client,
             ):
                 with patch("ggshield.verticals.machine.analyzer.check_client_api_key"):
-                    with patch("ggshield.cmd.machine.analyze.check_leaks") as mock_hmsl:
+                    with patch(
+                        "ggshield.cmd.machine.analyze.check_leaks", return_value={}
+                    ) as mock_hmsl:
                         cli_fs_runner.invoke(
                             cli, ["machine", "analyze", "--full-hashes"]
                         )

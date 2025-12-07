@@ -2,11 +2,12 @@
 Main secret gathering orchestrator for machine scanning.
 """
 
+import hashlib
 import time
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import Callable, Dict, Iterator, Optional, Pattern, Set
+from typing import TYPE_CHECKING, Callable, Dict, Iterator, List, Optional, Pattern, Set
 
 from ggshield.utils.files import is_path_excluded
 from ggshield.verticals.machine.sources import (
@@ -14,18 +15,52 @@ from ggshield.verticals.machine.sources import (
     SecretMetadata,
     SourceType,
 )
+
+
+if TYPE_CHECKING:
+    from pygitguardian import GGClient
+
+from ggshield.verticals.machine.sources.aider_config import AiderConfigSource
+from ggshield.verticals.machine.sources.aws_credentials import AwsCredentialsSource
+from ggshield.verticals.machine.sources.azure_cli import AzureCliSource
+from ggshield.verticals.machine.sources.cargo_credentials import CargoCredentialsSource
+from ggshield.verticals.machine.sources.circleci_config import CircleCIConfigSource
+from ggshield.verticals.machine.sources.claude_code import ClaudeCodeSource
+from ggshield.verticals.machine.sources.composer_auth import ComposerAuthSource
+from ggshield.verticals.machine.sources.continue_config import ContinueConfigSource
+from ggshield.verticals.machine.sources.docker_config import DockerConfigSource
 from ggshield.verticals.machine.sources.environment import EnvironmentSecretSource
+from ggshield.verticals.machine.sources.factory_auth import FactoryAuthSource
 from ggshield.verticals.machine.sources.file_matcher import (
     EnvFileMatcher,
     PrivateKeyMatcher,
     _looks_like_key_content,
 )
+from ggshield.verticals.machine.sources.gcp_adc import GcpAdcSource
+from ggshield.verticals.machine.sources.gem_credentials import GemCredentialsSource
+from ggshield.verticals.machine.sources.gemini_cli import GeminiCliSource
+from ggshield.verticals.machine.sources.git_credentials import GitCredentialsSource
 from ggshield.verticals.machine.sources.github_token import GitHubTokenSource
+from ggshield.verticals.machine.sources.gitlab_cli import GitLabCliSource
+from ggshield.verticals.machine.sources.gradle_properties import GradlePropertiesSource
+from ggshield.verticals.machine.sources.helm_config import HelmConfigSource
+from ggshield.verticals.machine.sources.joplin_config import JoplinConfigSource
+from ggshield.verticals.machine.sources.kubernetes_config import KubernetesConfigSource
+from ggshield.verticals.machine.sources.mysql_config import MysqlConfigSource
+from ggshield.verticals.machine.sources.netrc import NetrcSource
 from ggshield.verticals.machine.sources.npmrc import NpmrcSource
+from ggshield.verticals.machine.sources.pgpass import PgpassSource
+from ggshield.verticals.machine.sources.pypirc import PypircSource
+
+# Desktop apps
+from ggshield.verticals.machine.sources.raycast_config import RaycastConfigSource
+from ggshield.verticals.machine.sources.slack_credentials import SlackCredentialsSource
+from ggshield.verticals.machine.sources.travis_ci_config import TravisCIConfigSource
 from ggshield.verticals.machine.sources.unified_walker import (
     UnifiedFileSystemWalker,
     WalkerConfig,
 )
+from ggshield.verticals.machine.sources.vault_token import VaultTokenSource
 
 
 # Type alias for progress callback: (phase, files_visited, elapsed_seconds) -> None
@@ -49,6 +84,8 @@ class SourceResult:
     secrets_found: int = 0
     files_scanned: int = 0
     message: Optional[str] = None  # e.g., "no .npmrc found"
+    # For DEEP_SCAN: breakdown of secrets by detector type
+    detector_counts: Optional[Dict[str, int]] = None
 
 
 # Type alias for source completion callback
@@ -68,6 +105,9 @@ class GatheringConfig:
         default=None, repr=False
     )
     exclusion_regexes: Set[Pattern[str]] = field(default_factory=set)
+    # Deep scan settings (API-based comprehensive scanning)
+    deep_scan: bool = False
+    client: Optional["GGClient"] = field(default=None, repr=False)
 
 
 @dataclass
@@ -82,6 +122,42 @@ class GatheringStats:
     env_secrets: int = 0
     private_key_files: int = 0
     private_key_secrets: int = 0
+    # New credential sources
+    aws_credentials_secrets: int = 0
+    docker_config_secrets: int = 0
+    pypirc_secrets: int = 0
+    kubernetes_secrets: int = 0
+    vault_token_found: bool = False
+    netrc_secrets: int = 0
+    git_credentials_secrets: int = 0
+    cargo_credentials_secrets: int = 0
+    gem_credentials_secrets: int = 0
+    # Cloud providers (additional)
+    gcp_adc_secrets: int = 0
+    azure_cli_secrets: int = 0
+    # Package managers (additional)
+    composer_auth_secrets: int = 0
+    helm_config_secrets: int = 0
+    gradle_properties_secrets: int = 0
+    # CI/CD platforms
+    circleci_secrets: int = 0
+    gitlab_cli_secrets: int = 0
+    travis_ci_secrets: int = 0
+    # Databases
+    pgpass_secrets: int = 0
+    mysql_config_secrets: int = 0
+    # AI coding tools
+    claude_code_secrets: int = 0
+    gemini_cli_secrets: int = 0
+    aider_secrets: int = 0
+    continue_secrets: int = 0
+    # Messaging
+    slack_secrets: int = 0
+    # Deep scan (API-based)
+    deep_scan_files: int = 0
+    deep_scan_secrets: int = 0
+    deep_scan_skipped: int = 0
+    # Totals
     total_files_visited: int = 0
     elapsed_seconds: float = 0.0
     timed_out: bool = False
@@ -93,6 +169,10 @@ class MachineSecretGatherer:
 
     Uses a streaming approach - yields secrets as they're found
     without storing them to disk.
+
+    When deep_scan is enabled, also collects candidate files during
+    filesystem traversal and sends them to the GitGuardian API for
+    comprehensive scanning with 500+ detectors.
     """
 
     # Report progress every N files visited
@@ -103,6 +183,10 @@ class MachineSecretGatherer:
         self._stats = GatheringStats()
         self._start_time: Optional[float] = None
         self._last_progress_files: int = 0
+        # Content-hash deduplication (SHA256 of secret values)
+        self._seen_secret_hashes: Set[str] = set()
+        # Files to scan via API (for deep scan mode)
+        self._candidate_files: List[Path] = []
 
     def gather(self) -> Iterator[GatheredSecret]:
         """
@@ -110,9 +194,15 @@ class MachineSecretGatherer:
 
         Yields secrets as they're discovered. Statistics are
         updated incrementally and available via `stats` property.
+
+        When deep_scan is enabled, also sends candidate files to the
+        GitGuardian API for comprehensive scanning. Secrets are deduplicated
+        by content hash to ensure dedicated sources take priority.
         """
         self._start_time = time.time()
         self._stats = GatheringStats()
+        self._seen_secret_hashes.clear()
+        self._candidate_files.clear()
 
         home = self.config.home_dir or Path.home()
 
@@ -121,9 +211,49 @@ class MachineSecretGatherer:
         yield from self._gather_from_github_cli()
         yield from self._gather_from_npmrc(home)
 
+        # Credential file sources (fast, single-file reads)
+        yield from self._gather_from_aws_credentials(home)
+        yield from self._gather_from_docker_config(home)
+        yield from self._gather_from_pypirc(home)
+        yield from self._gather_from_kubernetes_config(home)
+        yield from self._gather_from_vault_token(home)
+        yield from self._gather_from_netrc(home)
+        yield from self._gather_from_git_credentials(home)
+        yield from self._gather_from_cargo_credentials(home)
+        yield from self._gather_from_gem_credentials(home)
+        # Cloud providers (additional)
+        yield from self._gather_from_gcp_adc(home)
+        yield from self._gather_from_azure_cli(home)
+        # Package managers (additional)
+        yield from self._gather_from_composer_auth(home)
+        yield from self._gather_from_helm_config(home)
+        yield from self._gather_from_gradle_properties(home)
+        # CI/CD platforms
+        yield from self._gather_from_circleci_config(home)
+        yield from self._gather_from_gitlab_cli(home)
+        yield from self._gather_from_travis_ci_config(home)
+        # Databases
+        yield from self._gather_from_pgpass(home)
+        yield from self._gather_from_mysql_config(home)
+        # AI coding tools
+        yield from self._gather_from_claude_code(home)
+        yield from self._gather_from_gemini_cli(home)
+        yield from self._gather_from_aider_config(home)
+        yield from self._gather_from_continue_config(home)
+        # Messaging
+        yield from self._gather_from_slack_credentials(home)
+        # Desktop apps
+        yield from self._gather_from_raycast_config(home)
+        yield from self._gather_from_joplin_config(home)
+        yield from self._gather_from_factory_auth(home)
+
         # Filesystem sources (single unified traversal, respects timeout)
         if not self._is_timed_out():
             yield from self._gather_from_filesystem(home)
+
+        # Deep scan phase (API-based comprehensive scanning)
+        if self.config.deep_scan and self.config.client and not self._is_timed_out():
+            yield from self._gather_from_deep_scan()
 
         self._stats.elapsed_seconds = time.time() - self._start_time
 
@@ -194,6 +324,595 @@ class MachineSecretGatherer:
             )
         )
 
+    def _gather_from_aws_credentials(self, home: Path) -> Iterator[GatheredSecret]:
+        """Gather secrets from ~/.aws/credentials."""
+        source = AwsCredentialsSource(home_dir=home)
+        secrets_found = 0
+        for secret in source.gather():
+            if len(secret.value) >= self.config.min_chars:
+                secrets_found += 1
+                self._stats.aws_credentials_secrets += 1
+                yield secret
+
+        self._report_source_complete(
+            SourceResult(
+                source_type=SourceType.AWS_CREDENTIALS,
+                status=(
+                    SourceStatus.COMPLETED
+                    if secrets_found > 0
+                    else SourceStatus.NOT_FOUND
+                ),
+                secrets_found=secrets_found,
+            )
+        )
+
+    def _gather_from_docker_config(self, home: Path) -> Iterator[GatheredSecret]:
+        """Gather secrets from ~/.docker/config.json."""
+        source = DockerConfigSource(home_dir=home)
+        secrets_found = 0
+        for secret in source.gather():
+            if len(secret.value) >= self.config.min_chars:
+                secrets_found += 1
+                self._stats.docker_config_secrets += 1
+                yield secret
+
+        self._report_source_complete(
+            SourceResult(
+                source_type=SourceType.DOCKER_CONFIG,
+                status=(
+                    SourceStatus.COMPLETED
+                    if secrets_found > 0
+                    else SourceStatus.NOT_FOUND
+                ),
+                secrets_found=secrets_found,
+            )
+        )
+
+    def _gather_from_pypirc(self, home: Path) -> Iterator[GatheredSecret]:
+        """Gather secrets from ~/.pypirc."""
+        source = PypircSource(home_dir=home)
+        secrets_found = 0
+        for secret in source.gather():
+            if len(secret.value) >= self.config.min_chars:
+                secrets_found += 1
+                self._stats.pypirc_secrets += 1
+                yield secret
+
+        self._report_source_complete(
+            SourceResult(
+                source_type=SourceType.PYPIRC,
+                status=(
+                    SourceStatus.COMPLETED
+                    if secrets_found > 0
+                    else SourceStatus.NOT_FOUND
+                ),
+                secrets_found=secrets_found,
+            )
+        )
+
+    def _gather_from_kubernetes_config(self, home: Path) -> Iterator[GatheredSecret]:
+        """Gather secrets from ~/.kube/config."""
+        source = KubernetesConfigSource(home_dir=home)
+        secrets_found = 0
+        for secret in source.gather():
+            if len(secret.value) >= self.config.min_chars:
+                secrets_found += 1
+                self._stats.kubernetes_secrets += 1
+                yield secret
+
+        self._report_source_complete(
+            SourceResult(
+                source_type=SourceType.KUBERNETES_CONFIG,
+                status=(
+                    SourceStatus.COMPLETED
+                    if secrets_found > 0
+                    else SourceStatus.NOT_FOUND
+                ),
+                secrets_found=secrets_found,
+            )
+        )
+
+    def _gather_from_vault_token(self, home: Path) -> Iterator[GatheredSecret]:
+        """Gather secrets from ~/.vault-token."""
+        source = VaultTokenSource(home_dir=home)
+        for secret in source.gather():
+            if len(secret.value) >= self.config.min_chars:
+                self._stats.vault_token_found = True
+                yield secret
+
+        self._report_source_complete(
+            SourceResult(
+                source_type=SourceType.VAULT_TOKEN,
+                status=(
+                    SourceStatus.COMPLETED
+                    if self._stats.vault_token_found
+                    else SourceStatus.NOT_FOUND
+                ),
+                secrets_found=1 if self._stats.vault_token_found else 0,
+            )
+        )
+
+    def _gather_from_netrc(self, home: Path) -> Iterator[GatheredSecret]:
+        """Gather secrets from ~/.netrc."""
+        source = NetrcSource(home_dir=home)
+        secrets_found = 0
+        for secret in source.gather():
+            if len(secret.value) >= self.config.min_chars:
+                secrets_found += 1
+                self._stats.netrc_secrets += 1
+                yield secret
+
+        self._report_source_complete(
+            SourceResult(
+                source_type=SourceType.NETRC,
+                status=(
+                    SourceStatus.COMPLETED
+                    if secrets_found > 0
+                    else SourceStatus.NOT_FOUND
+                ),
+                secrets_found=secrets_found,
+            )
+        )
+
+    def _gather_from_git_credentials(self, home: Path) -> Iterator[GatheredSecret]:
+        """Gather secrets from ~/.git-credentials."""
+        source = GitCredentialsSource(home_dir=home)
+        secrets_found = 0
+        for secret in source.gather():
+            if len(secret.value) >= self.config.min_chars:
+                secrets_found += 1
+                self._stats.git_credentials_secrets += 1
+                yield secret
+
+        self._report_source_complete(
+            SourceResult(
+                source_type=SourceType.GIT_CREDENTIALS,
+                status=(
+                    SourceStatus.COMPLETED
+                    if secrets_found > 0
+                    else SourceStatus.NOT_FOUND
+                ),
+                secrets_found=secrets_found,
+            )
+        )
+
+    def _gather_from_cargo_credentials(self, home: Path) -> Iterator[GatheredSecret]:
+        """Gather secrets from ~/.cargo/credentials.toml."""
+        source = CargoCredentialsSource(home_dir=home)
+        secrets_found = 0
+        for secret in source.gather():
+            if len(secret.value) >= self.config.min_chars:
+                secrets_found += 1
+                self._stats.cargo_credentials_secrets += 1
+                yield secret
+
+        self._report_source_complete(
+            SourceResult(
+                source_type=SourceType.CARGO_CREDENTIALS,
+                status=(
+                    SourceStatus.COMPLETED
+                    if secrets_found > 0
+                    else SourceStatus.NOT_FOUND
+                ),
+                secrets_found=secrets_found,
+            )
+        )
+
+    def _gather_from_gem_credentials(self, home: Path) -> Iterator[GatheredSecret]:
+        """Gather secrets from ~/.gem/credentials."""
+        source = GemCredentialsSource(home_dir=home)
+        secrets_found = 0
+        for secret in source.gather():
+            if len(secret.value) >= self.config.min_chars:
+                secrets_found += 1
+                self._stats.gem_credentials_secrets += 1
+                yield secret
+
+        self._report_source_complete(
+            SourceResult(
+                source_type=SourceType.GEM_CREDENTIALS,
+                status=(
+                    SourceStatus.COMPLETED
+                    if secrets_found > 0
+                    else SourceStatus.NOT_FOUND
+                ),
+                secrets_found=secrets_found,
+            )
+        )
+
+    def _gather_from_gcp_adc(self, home: Path) -> Iterator[GatheredSecret]:
+        """Gather secrets from GCP Application Default Credentials."""
+        source = GcpAdcSource(home_dir=home)
+        secrets_found = 0
+        for secret in source.gather():
+            if len(secret.value) >= self.config.min_chars:
+                secrets_found += 1
+                self._stats.gcp_adc_secrets += 1
+                yield secret
+
+        self._report_source_complete(
+            SourceResult(
+                source_type=SourceType.GCP_ADC,
+                status=(
+                    SourceStatus.COMPLETED
+                    if secrets_found > 0
+                    else SourceStatus.NOT_FOUND
+                ),
+                secrets_found=secrets_found,
+            )
+        )
+
+    def _gather_from_azure_cli(self, home: Path) -> Iterator[GatheredSecret]:
+        """Gather secrets from Azure CLI credential files."""
+        source = AzureCliSource(home_dir=home)
+        secrets_found = 0
+        for secret in source.gather():
+            if len(secret.value) >= self.config.min_chars:
+                secrets_found += 1
+                self._stats.azure_cli_secrets += 1
+                yield secret
+
+        self._report_source_complete(
+            SourceResult(
+                source_type=SourceType.AZURE_CLI,
+                status=(
+                    SourceStatus.COMPLETED
+                    if secrets_found > 0
+                    else SourceStatus.NOT_FOUND
+                ),
+                secrets_found=secrets_found,
+            )
+        )
+
+    def _gather_from_composer_auth(self, home: Path) -> Iterator[GatheredSecret]:
+        """Gather secrets from Composer auth.json."""
+        source = ComposerAuthSource(home_dir=home)
+        secrets_found = 0
+        for secret in source.gather():
+            if len(secret.value) >= self.config.min_chars:
+                secrets_found += 1
+                self._stats.composer_auth_secrets += 1
+                yield secret
+
+        self._report_source_complete(
+            SourceResult(
+                source_type=SourceType.COMPOSER_AUTH,
+                status=(
+                    SourceStatus.COMPLETED
+                    if secrets_found > 0
+                    else SourceStatus.NOT_FOUND
+                ),
+                secrets_found=secrets_found,
+            )
+        )
+
+    def _gather_from_helm_config(self, home: Path) -> Iterator[GatheredSecret]:
+        """Gather secrets from Helm registry config."""
+        source = HelmConfigSource(home_dir=home)
+        secrets_found = 0
+        for secret in source.gather():
+            if len(secret.value) >= self.config.min_chars:
+                secrets_found += 1
+                self._stats.helm_config_secrets += 1
+                yield secret
+
+        self._report_source_complete(
+            SourceResult(
+                source_type=SourceType.HELM_CONFIG,
+                status=(
+                    SourceStatus.COMPLETED
+                    if secrets_found > 0
+                    else SourceStatus.NOT_FOUND
+                ),
+                secrets_found=secrets_found,
+            )
+        )
+
+    def _gather_from_gradle_properties(self, home: Path) -> Iterator[GatheredSecret]:
+        """Gather secrets from Gradle properties."""
+        source = GradlePropertiesSource(home_dir=home)
+        secrets_found = 0
+        for secret in source.gather():
+            if len(secret.value) >= self.config.min_chars:
+                secrets_found += 1
+                self._stats.gradle_properties_secrets += 1
+                yield secret
+
+        self._report_source_complete(
+            SourceResult(
+                source_type=SourceType.GRADLE_PROPERTIES,
+                status=(
+                    SourceStatus.COMPLETED
+                    if secrets_found > 0
+                    else SourceStatus.NOT_FOUND
+                ),
+                secrets_found=secrets_found,
+            )
+        )
+
+    def _gather_from_circleci_config(self, home: Path) -> Iterator[GatheredSecret]:
+        """Gather secrets from CircleCI CLI config."""
+        source = CircleCIConfigSource(home_dir=home)
+        secrets_found = 0
+        for secret in source.gather():
+            if len(secret.value) >= self.config.min_chars:
+                secrets_found += 1
+                self._stats.circleci_secrets += 1
+                yield secret
+
+        self._report_source_complete(
+            SourceResult(
+                source_type=SourceType.CIRCLECI_CONFIG,
+                status=(
+                    SourceStatus.COMPLETED
+                    if secrets_found > 0
+                    else SourceStatus.NOT_FOUND
+                ),
+                secrets_found=secrets_found,
+            )
+        )
+
+    def _gather_from_gitlab_cli(self, home: Path) -> Iterator[GatheredSecret]:
+        """Gather secrets from GitLab CLI config."""
+        source = GitLabCliSource(home_dir=home)
+        secrets_found = 0
+        for secret in source.gather():
+            if len(secret.value) >= self.config.min_chars:
+                secrets_found += 1
+                self._stats.gitlab_cli_secrets += 1
+                yield secret
+
+        self._report_source_complete(
+            SourceResult(
+                source_type=SourceType.GITLAB_CLI,
+                status=(
+                    SourceStatus.COMPLETED
+                    if secrets_found > 0
+                    else SourceStatus.NOT_FOUND
+                ),
+                secrets_found=secrets_found,
+            )
+        )
+
+    def _gather_from_travis_ci_config(self, home: Path) -> Iterator[GatheredSecret]:
+        """Gather secrets from Travis CI CLI config."""
+        source = TravisCIConfigSource(home_dir=home)
+        secrets_found = 0
+        for secret in source.gather():
+            if len(secret.value) >= self.config.min_chars:
+                secrets_found += 1
+                self._stats.travis_ci_secrets += 1
+                yield secret
+
+        self._report_source_complete(
+            SourceResult(
+                source_type=SourceType.TRAVIS_CI_CONFIG,
+                status=(
+                    SourceStatus.COMPLETED
+                    if secrets_found > 0
+                    else SourceStatus.NOT_FOUND
+                ),
+                secrets_found=secrets_found,
+            )
+        )
+
+    def _gather_from_pgpass(self, home: Path) -> Iterator[GatheredSecret]:
+        """Gather secrets from PostgreSQL .pgpass file."""
+        source = PgpassSource(home_dir=home)
+        secrets_found = 0
+        for secret in source.gather():
+            if len(secret.value) >= self.config.min_chars:
+                secrets_found += 1
+                self._stats.pgpass_secrets += 1
+                yield secret
+
+        self._report_source_complete(
+            SourceResult(
+                source_type=SourceType.PGPASS,
+                status=(
+                    SourceStatus.COMPLETED
+                    if secrets_found > 0
+                    else SourceStatus.NOT_FOUND
+                ),
+                secrets_found=secrets_found,
+            )
+        )
+
+    def _gather_from_mysql_config(self, home: Path) -> Iterator[GatheredSecret]:
+        """Gather secrets from MySQL .my.cnf file."""
+        source = MysqlConfigSource(home_dir=home)
+        secrets_found = 0
+        for secret in source.gather():
+            if len(secret.value) >= self.config.min_chars:
+                secrets_found += 1
+                self._stats.mysql_config_secrets += 1
+                yield secret
+
+        self._report_source_complete(
+            SourceResult(
+                source_type=SourceType.MYSQL_CONFIG,
+                status=(
+                    SourceStatus.COMPLETED
+                    if secrets_found > 0
+                    else SourceStatus.NOT_FOUND
+                ),
+                secrets_found=secrets_found,
+            )
+        )
+
+    def _gather_from_claude_code(self, home: Path) -> Iterator[GatheredSecret]:
+        """Gather secrets from Claude Code config."""
+        source = ClaudeCodeSource(home_dir=home)
+        secrets_found = 0
+        for secret in source.gather():
+            if len(secret.value) >= self.config.min_chars:
+                secrets_found += 1
+                self._stats.claude_code_secrets += 1
+                yield secret
+
+        self._report_source_complete(
+            SourceResult(
+                source_type=SourceType.CLAUDE_CODE,
+                status=(
+                    SourceStatus.COMPLETED
+                    if secrets_found > 0
+                    else SourceStatus.NOT_FOUND
+                ),
+                secrets_found=secrets_found,
+            )
+        )
+
+    def _gather_from_gemini_cli(self, home: Path) -> Iterator[GatheredSecret]:
+        """Gather secrets from Gemini CLI config."""
+        source = GeminiCliSource(home_dir=home)
+        secrets_found = 0
+        for secret in source.gather():
+            if len(secret.value) >= self.config.min_chars:
+                secrets_found += 1
+                self._stats.gemini_cli_secrets += 1
+                yield secret
+
+        self._report_source_complete(
+            SourceResult(
+                source_type=SourceType.GEMINI_CLI,
+                status=(
+                    SourceStatus.COMPLETED
+                    if secrets_found > 0
+                    else SourceStatus.NOT_FOUND
+                ),
+                secrets_found=secrets_found,
+            )
+        )
+
+    def _gather_from_aider_config(self, home: Path) -> Iterator[GatheredSecret]:
+        """Gather secrets from Aider config."""
+        source = AiderConfigSource(home_dir=home)
+        secrets_found = 0
+        for secret in source.gather():
+            if len(secret.value) >= self.config.min_chars:
+                secrets_found += 1
+                self._stats.aider_secrets += 1
+                yield secret
+
+        self._report_source_complete(
+            SourceResult(
+                source_type=SourceType.AIDER_CONFIG,
+                status=(
+                    SourceStatus.COMPLETED
+                    if secrets_found > 0
+                    else SourceStatus.NOT_FOUND
+                ),
+                secrets_found=secrets_found,
+            )
+        )
+
+    def _gather_from_continue_config(self, home: Path) -> Iterator[GatheredSecret]:
+        """Gather secrets from Continue.dev config."""
+        source = ContinueConfigSource(home_dir=home)
+        secrets_found = 0
+        for secret in source.gather():
+            if len(secret.value) >= self.config.min_chars:
+                secrets_found += 1
+                self._stats.continue_secrets += 1
+                yield secret
+
+        self._report_source_complete(
+            SourceResult(
+                source_type=SourceType.CONTINUE_CONFIG,
+                status=(
+                    SourceStatus.COMPLETED
+                    if secrets_found > 0
+                    else SourceStatus.NOT_FOUND
+                ),
+                secrets_found=secrets_found,
+            )
+        )
+
+    def _gather_from_slack_credentials(self, home: Path) -> Iterator[GatheredSecret]:
+        """Gather secrets from Slack credentials."""
+        source = SlackCredentialsSource(home_dir=home)
+        secrets_found = 0
+        for secret in source.gather():
+            if len(secret.value) >= self.config.min_chars:
+                secrets_found += 1
+                self._stats.slack_secrets += 1
+                yield secret
+
+        self._report_source_complete(
+            SourceResult(
+                source_type=SourceType.SLACK_CREDENTIALS,
+                status=(
+                    SourceStatus.COMPLETED
+                    if secrets_found > 0
+                    else SourceStatus.NOT_FOUND
+                ),
+                secrets_found=secrets_found,
+            )
+        )
+
+    def _gather_from_raycast_config(self, home: Path) -> Iterator[GatheredSecret]:
+        """Gather secrets from Raycast config."""
+        source = RaycastConfigSource(home_dir=home)
+        secrets_found = 0
+        for secret in source.gather():
+            if len(secret.value) >= self.config.min_chars:
+                secrets_found += 1
+                yield secret
+
+        self._report_source_complete(
+            SourceResult(
+                source_type=SourceType.RAYCAST_CONFIG,
+                status=(
+                    SourceStatus.COMPLETED
+                    if secrets_found > 0
+                    else SourceStatus.NOT_FOUND
+                ),
+                secrets_found=secrets_found,
+            )
+        )
+
+    def _gather_from_joplin_config(self, home: Path) -> Iterator[GatheredSecret]:
+        """Gather secrets from Joplin config."""
+        source = JoplinConfigSource(home_dir=home)
+        secrets_found = 0
+        for secret in source.gather():
+            if len(secret.value) >= self.config.min_chars:
+                secrets_found += 1
+                yield secret
+
+        self._report_source_complete(
+            SourceResult(
+                source_type=SourceType.JOPLIN_CONFIG,
+                status=(
+                    SourceStatus.COMPLETED
+                    if secrets_found > 0
+                    else SourceStatus.NOT_FOUND
+                ),
+                secrets_found=secrets_found,
+            )
+        )
+
+    def _gather_from_factory_auth(self, home: Path) -> Iterator[GatheredSecret]:
+        """Gather secrets from Factory CLI auth."""
+        source = FactoryAuthSource(home_dir=home)
+        secrets_found = 0
+        for secret in source.gather():
+            if len(secret.value) >= self.config.min_chars:
+                secrets_found += 1
+                yield secret
+
+        self._report_source_complete(
+            SourceResult(
+                source_type=SourceType.FACTORY_AUTH,
+                status=(
+                    SourceStatus.COMPLETED
+                    if secrets_found > 0
+                    else SourceStatus.NOT_FOUND
+                ),
+                secrets_found=secrets_found,
+            )
+        )
+
     def _gather_from_filesystem(self, home: Path) -> Iterator[GatheredSecret]:
         """
         Gather secrets from filesystem using single unified traversal.
@@ -222,12 +941,16 @@ class MachineSecretGatherer:
             self._stats.total_files_visited = files_visited
             self._report_progress_with_counts(files_visited, matches_by_type)
 
+        # Callback for collecting candidate files for deep scan
+        on_candidate = self._add_candidate_file if self.config.deep_scan else None
+
         walker_config = WalkerConfig(
             home_dir=home,
             matchers=[env_matcher, key_matcher],
             is_timed_out=self._is_timed_out,
             exclusion_regexes=self.config.exclusion_regexes,
             on_progress=on_walker_progress,
+            on_candidate_file=on_candidate,
         )
 
         walker = UnifiedFileSystemWalker(walker_config)
@@ -418,3 +1141,90 @@ class MachineSecretGatherer:
     def stats(self) -> GatheringStats:
         """Return gathering statistics."""
         return self._stats
+
+    def _is_duplicate_secret(self, secret_value: str) -> bool:
+        """
+        Check if a secret value has already been seen.
+
+        Uses SHA256 hash for efficient comparison without storing actual values.
+
+        Args:
+            secret_value: The secret value to check
+
+        Returns:
+            True if this secret has been seen before
+        """
+        secret_hash = hashlib.sha256(secret_value.encode()).hexdigest()
+        if secret_hash in self._seen_secret_hashes:
+            return True
+        self._seen_secret_hashes.add(secret_hash)
+        return False
+
+    def _gather_from_deep_scan(self) -> Iterator[GatheredSecret]:
+        """
+        Gather secrets via GitGuardian API deep scan.
+
+        Sends collected candidate files to the API for comprehensive
+        scanning with 500+ detectors. Results are deduplicated against
+        secrets already found by dedicated sources.
+        """
+        if not self._candidate_files or not self.config.client:
+            return
+
+        # Import here to avoid circular imports
+        from ggshield.verticals.machine.deep_scanner import DeepFileScanner
+
+        self._report_progress_force(
+            f"Deep scanning {len(self._candidate_files)} files via API"
+        )
+
+        scanner = DeepFileScanner(self.config.client)
+
+        def on_deep_scan_progress(files_scanned: int, total: int) -> None:
+            self._report_progress_force(
+                f"Deep scanning files via API ({files_scanned}/{total})"
+            )
+
+        result = scanner.scan_files(
+            self._candidate_files, on_progress=on_deep_scan_progress
+        )
+
+        # Update stats
+        self._stats.deep_scan_files = result.files_scanned
+        self._stats.deep_scan_skipped = result.files_skipped
+
+        # Collect detector counts and yield secrets with deduplication
+        detector_counts: Dict[str, int] = {}
+        for secret in result.secrets:
+            if not self._is_duplicate_secret(secret.value):
+                self._stats.deep_scan_secrets += 1
+                # Count by detector type (stored in secret_name)
+                detector_type = secret.metadata.secret_name
+                detector_counts[detector_type] = (
+                    detector_counts.get(detector_type, 0) + 1
+                )
+                yield secret
+
+        # Report completion with detector breakdown
+        self._report_source_complete(
+            SourceResult(
+                source_type=SourceType.DEEP_SCAN,
+                status=SourceStatus.COMPLETED,
+                secrets_found=self._stats.deep_scan_secrets,
+                files_scanned=result.files_scanned,
+                detector_counts=detector_counts if detector_counts else None,
+            )
+        )
+
+    def _add_candidate_file(self, file_path: Path) -> None:
+        """
+        Add a file to the candidate list for deep scanning.
+
+        Called during filesystem traversal for files that match
+        deep scan extensions.
+
+        Args:
+            file_path: Path to add to candidate list
+        """
+        if self.config.deep_scan:
+            self._candidate_files.append(file_path)

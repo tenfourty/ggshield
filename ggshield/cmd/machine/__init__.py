@@ -26,6 +26,8 @@ def machine_group(**kwargs: Any) -> None:
     """
     Commands for machine-wide secret scanning and management.
 
+    [Alpha] This feature is under active development and may change.
+
     Scan your local machine for secrets in environment variables,
     configuration files, and private key files. Check if secrets
     have been publicly exposed or analyze them with the GitGuardian API.

@@ -45,6 +45,15 @@ def machine_scan_options(f: F) -> F:
         default=False,
         help="Don't apply ignored_paths from .gitguardian.yaml config files.",
     )
+    @click.option(
+        "--deep",
+        is_flag=True,
+        default=False,
+        help=(
+            "Send files to GitGuardian API for comprehensive scanning with 500+ "
+            "secret detectors. Requires a valid API key."
+        ),
+    )
     @wraps(f)
     def wrapper(*args: Any, **kwargs: Any) -> Any:
         return f(*args, **kwargs)
@@ -61,6 +70,16 @@ def hmsl_options(f: F) -> F:
         is_flag=True,
         default=False,
         help="Use full hashes when checking against HMSL (uses more credits but more accurate).",
+    )
+    @click.option(
+        "--leaked-threshold",
+        type=int,
+        default=100,
+        show_default=True,
+        help=(
+            "Hide leaked secrets with >= N occurrences from details "
+            "(likely false positives). Use 0 to show all."
+        ),
     )
     @wraps(f)
     def wrapper(*args: Any, **kwargs: Any) -> Any:

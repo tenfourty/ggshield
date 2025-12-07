@@ -39,8 +39,10 @@ class AnalyzedSecret:
     known_secret: bool = False
     incident_url: Optional[str] = None
 
-    # HMSL leak status (set by `machine analyze` command)
+    # HMSL leak info (set by `machine analyze` command)
     hmsl_leaked: Optional[bool] = None
+    hmsl_occurrences: Optional[int] = None  # Number of times found in public data
+    hmsl_url: Optional[str] = None  # URL where it was first found
 
     @property
     def is_detected(self) -> bool:
@@ -140,55 +142,80 @@ class MachineSecretAnalyzer:
 
         Returns AnalysisResult with detector info, validity, and known_secret status.
         Does NOT create incidents in the dashboard.
+
+        Note: DEEP_SCAN secrets are not re-analyzed since they already have API results
+        stored in their metadata from the initial deep scan.
         """
         if not secrets:
             return AnalysisResult()
 
-        # Check API key has required scopes
-        check_client_api_key(self.client, {TokenScope.SCAN})
-
         result = AnalysisResult()
-
-        # Get batch size from client preferences
-        batch_size = int(
-            getattr(
-                self.client.secret_scan_preferences,
-                "maximum_documents_per_scan",
-                _DEFAULT_BATCH_SIZE,
-            )
-        )
-
-        # Process secrets in batches
         all_analyzed: List[AnalyzedSecret] = []
 
-        for batch in batched(secrets, batch_size):
-            batch_list = list(batch)
-            documents = self._create_documents(batch_list)
+        # Separate DEEP_SCAN secrets (already analyzed) from others
+        deep_scan_secrets = [
+            s for s in secrets if s.metadata.source_type == SourceType.DEEP_SCAN
+        ]
+        other_secrets = [
+            s for s in secrets if s.metadata.source_type != SourceType.DEEP_SCAN
+        ]
 
-            try:
-                scan_result = self.client.multi_content_scan(
-                    documents,
-                    self.headers,
-                    all_secrets=True,
+        # Convert DEEP_SCAN secrets directly - they already have API results
+        for secret in deep_scan_secrets:
+            all_analyzed.append(
+                AnalyzedSecret(
+                    gathered_secret=secret,
+                    detector_name=secret.metadata.detector_name,
+                    detector_display_name=secret.metadata.secret_name,
+                    validity=secret.metadata.validity,
+                    known_secret=secret.metadata.known_secret,
+                    incident_url=secret.metadata.incident_url,
                 )
+            )
 
-                if isinstance(scan_result, Detail):
-                    handle_api_error(scan_result)
-                    result.errors.append(f"API error: {scan_result.detail}")
+        # Only call API for non-deep-scan secrets
+        if other_secrets:
+            # Check API key has required scopes
+            check_client_api_key(self.client, {TokenScope.SCAN})
+
+            # Get batch size from client preferences
+            batch_size = int(
+                getattr(
+                    self.client.secret_scan_preferences,
+                    "maximum_documents_per_scan",
+                    _DEFAULT_BATCH_SIZE,
+                )
+            )
+
+            # Process secrets in batches
+            for batch in batched(other_secrets, batch_size):
+                batch_list = list(batch)
+                documents = self._create_documents(batch_list)
+
+                try:
+                    scan_result = self.client.multi_content_scan(
+                        documents,
+                        self.headers,
+                        all_secrets=True,
+                    )
+
+                    if isinstance(scan_result, Detail):
+                        handle_api_error(scan_result)
+                        result.errors.append(f"API error: {scan_result.detail}")
+                        result.unanalyzed_count += len(batch_list)
+                        continue
+
+                    # Merge this batch's results
+                    all_analyzed.extend(self._merge_results(batch_list, scan_result))
+
+                except QuotaLimitReachedError:
+                    result.errors.append("API quota limit reached")
                     result.unanalyzed_count += len(batch_list)
-                    continue
-
-                # Merge this batch's results
-                all_analyzed.extend(self._merge_results(batch_list, scan_result))
-
-            except QuotaLimitReachedError:
-                result.errors.append("API quota limit reached")
-                result.unanalyzed_count += len(batch_list)
-                raise
-            except Exception as e:
-                logger.exception("Error during secret analysis")
-                result.errors.append(f"Analysis error: {e}")
-                result.unanalyzed_count += len(batch_list)
+                    raise
+                except Exception as e:
+                    logger.exception("Error during secret analysis")
+                    result.errors.append(f"Analysis error: {e}")
+                    result.unanalyzed_count += len(batch_list)
 
         result.analyzed_secrets = all_analyzed
         return result

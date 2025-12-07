@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, List, Tuple
+from typing import TYPE_CHECKING, Any, Dict, List, Tuple
 
 import click
 
@@ -36,7 +36,7 @@ from ggshield.verticals.hmsl.collection import (
     SecretWithKey,
     prepare,
 )
-from ggshield.verticals.machine.output import display_analyzed_results
+from ggshield.verticals.machine.output import LeakedSecretInfo, display_analyzed_results
 from ggshield.verticals.machine.secret_gatherer import (
     GatheringConfig,
     MachineSecretGatherer,
@@ -68,19 +68,25 @@ def check_leaks(
     ctx: click.Context,
     secrets: List[GatheredSecret],
     full_hashes: bool = False,
-) -> set:
+) -> Dict[str, LeakedSecretInfo]:
     """
-    Check secrets against HMSL and return leaked keys.
+    Check secrets against HMSL and return leaked secret info.
 
     This function is designed to be patchable in tests.
 
     Returns:
-        Set of leaked secret keys.
+        Dict mapping key (name + path) to LeakedSecretInfo.
     """
     from ggshield.verticals.hmsl.client import HMSLClient
     from ggshield.verticals.hmsl.utils import get_client
 
     prepared_data = _prepare_secrets_for_hmsl(secrets)
+
+    # Build reverse mapping from key to secret value
+    key_to_value: Dict[str, str] = {}
+    for s in secrets:
+        key = f"{s.metadata.secret_name} ({s.metadata.source_path})"
+        key_to_value[key] = s.value
 
     # Get HMSL client and check
     ctx_obj = ContextObj.get(ctx)
@@ -89,28 +95,39 @@ def check_leaks(
     # Query HMSL
     found_secrets = hmsl_client.check(prepared_data.payload, full_hashes=full_hashes)
 
-    # Extract leaked keys
-    leaked_keys: set = set()
+    # Extract leaked info with full details
+    leaked_info: Dict[str, LeakedSecretInfo] = {}
     for secret in found_secrets:
         name = prepared_data.mapping.get(secret.hash)
         if name:
-            leaked_keys.add(name)
+            leaked_info[name] = LeakedSecretInfo(
+                key=name,
+                count=secret.count,
+                url=secret.url,
+                secret_value=key_to_value.get(name, ""),
+            )
 
-    return leaked_keys
+    return leaked_info
 
 
 def _merge_hmsl_results(
     secrets: List[GatheredSecret],
     result: AnalysisResult,
-    leaked_keys: set,
+    leaked_info: Dict[str, LeakedSecretInfo],
 ) -> None:
     """
-    Merge HMSL leaked status into analysis results.
+    Merge HMSL leaked status and details into analysis results.
     """
     for analyzed in result.analyzed_secrets:
         metadata = analyzed.gathered_secret.metadata
         key = f"{metadata.secret_name} ({metadata.source_path})"
-        analyzed.hmsl_leaked = key in leaked_keys
+        info = leaked_info.get(key)
+        if info:
+            analyzed.hmsl_leaked = True
+            analyzed.hmsl_occurrences = info.count
+            analyzed.hmsl_url = info.url
+        else:
+            analyzed.hmsl_leaked = False
 
 
 @click.command()
@@ -125,14 +142,18 @@ def analyze_cmd(
     ctx: click.Context,
     output: Path | None,
     full_hashes: bool,
+    leaked_threshold: int,
     timeout: int,
     min_chars: int,
     exclude: Tuple[str, ...],
     ignore_config_exclusions: bool,
+    deep: bool,
     **kwargs: Any,
 ) -> int:
     """
     Scan, check for public leaks, and analyze with GitGuardian API.
+
+    [Alpha] This command is under active development and may change.
 
     This command provides comprehensive analysis of secrets found on your machine:
 
@@ -157,8 +178,14 @@ def analyze_cmd(
       - Private key files (SSH, SSL, crypto keys)
 
     \b
+    With --deep flag:
+      - Also sends config files (.json, .yaml, etc.) to GitGuardian API
+      - Uses 500+ secret detectors for comprehensive scanning
+
+    \b
     Examples:
       ggshield machine analyze                # Full analysis
+      ggshield machine analyze --deep         # Include API-based deep scan
       ggshield machine analyze -v             # Verbose per-secret details
       ggshield machine analyze -o out.json    # Save detailed results to file
       ggshield machine analyze --json         # JSON output to stdout
@@ -169,8 +196,17 @@ def analyze_cmd(
 
     ctx_obj = ContextObj.get(ctx)
 
+    # Show alpha warning (not in JSON mode)
+    if not ctx_obj.use_json:
+        ui.display_warning(
+            "Alpha feature: This command is under active development and may change."
+        )
+
     # Don't show progress for JSON output
     show_progress = not ctx_obj.use_json
+
+    # Create client (always needed for analyze, also used for deep scan)
+    client = create_client_from_config(ctx_obj.config)
 
     # Build exclusion patterns from config and CLI options
     exclusion_patterns: set[str] = set()
@@ -186,7 +222,10 @@ def analyze_cmd(
     exclusion_regexes = init_exclusion_regexes(exclusion_patterns)
 
     if show_progress:
-        ui.display_info("Scanning machine for secrets...\n")
+        if deep:
+            ui.display_info("Scanning machine for secrets (deep mode)...\n")
+        else:
+            ui.display_info("Scanning machine for secrets...\n")
 
     # Gather secrets with progress reporting
     with ScanProgressReporter(enabled=show_progress) as progress:
@@ -197,6 +236,8 @@ def analyze_cmd(
             on_progress=progress.on_progress,
             on_source_complete=progress.on_source_complete,
             exclusion_regexes=exclusion_regexes,
+            deep_scan=deep,
+            client=client if deep else None,  # Only pass client if deep scan
         )
 
         gatherer = MachineSecretGatherer(config)
@@ -231,8 +272,8 @@ def analyze_cmd(
     if show_progress:
         ui.display_info("Checking secrets against HasMySecretLeaked...")
 
-    leaked_keys = check_leaks(ctx, secrets, full_hashes=full_hashes)
-    _merge_hmsl_results(secrets, result, leaked_keys)
+    leaked_info = check_leaks(ctx, secrets, full_hashes=full_hashes)
+    _merge_hmsl_results(secrets, result, leaked_info)
 
     leaked_count = sum(1 for a in result.analyzed_secrets if a.hmsl_leaked)
     if leaked_count > 0:
@@ -244,6 +285,7 @@ def analyze_cmd(
         json_output=ctx_obj.use_json,
         verbose=ui.is_verbose(),
         output_file=output,
+        leaked_threshold=leaked_threshold,
     )
 
     # Return appropriate exit code

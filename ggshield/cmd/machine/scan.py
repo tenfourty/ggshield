@@ -2,7 +2,7 @@
 Machine scan command - gathers secrets from the local machine.
 
 This command is the fastest option for getting an inventory of potential secrets.
-No network calls are made.
+No network calls are made by default. Use --deep for comprehensive API-based scanning.
 """
 
 from __future__ import annotations
@@ -12,6 +12,7 @@ import sys
 from typing import Any, List, Optional, Tuple
 
 import click
+from pygitguardian.models import TokenScope
 
 from ggshield.cmd.machine.common_options import machine_scan_options
 from ggshield.cmd.utils.common_options import (
@@ -21,6 +22,7 @@ from ggshield.cmd.utils.common_options import (
 )
 from ggshield.cmd.utils.context_obj import ContextObj
 from ggshield.core import ui
+from ggshield.core.client import check_client_api_key, create_client_from_config
 from ggshield.core.errors import ExitCode
 from ggshield.core.filter import init_exclusion_regexes
 from ggshield.core.text_utils import pluralize
@@ -106,6 +108,15 @@ class ScanProgressReporter:
 
         self._write_line(f"  {icon} {label}: {status}")
 
+        # For DEEP_SCAN, show detector breakdown
+        if result.source_type == SourceType.DEEP_SCAN and result.detector_counts:
+            # Sort by count descending
+            sorted_detectors = sorted(
+                result.detector_counts.items(), key=lambda x: -x[1]
+            )
+            for detector, count in sorted_detectors:
+                self._write_line(f"      {detector}: {count}")
+
     def on_progress(self, phase: str, files_visited: int, elapsed: float) -> None:
         """Update the spinner during filesystem scans."""
         if not self.enabled:
@@ -160,10 +171,13 @@ def scan_cmd(
     min_chars: int,
     exclude: Tuple[str, ...],
     ignore_config_exclusions: bool,
+    deep: bool,
     **kwargs: Any,
 ) -> int:
     """
-    Scan the local machine for secrets (fast inventory, no network calls).
+    Scan the local machine for secrets (fast inventory).
+
+    [Alpha] This command is under active development and may change.
 
     Gathers potential secrets from environment variables, configuration files,
     and private key files. This is the fastest option for getting an inventory
@@ -183,16 +197,35 @@ def scan_cmd(
       - Private key files (SSH, SSL, crypto keys)
 
     \b
+    With --deep flag:
+      - Sends config files (.json, .yaml, etc.) to GitGuardian API
+      - Uses 500+ secret detectors for comprehensive scanning
+      - Requires a valid API key
+
+    \b
     Examples:
-      ggshield machine scan              # Fast inventory
+      ggshield machine scan              # Fast local inventory
+      ggshield machine scan --deep       # Include API-based deep scan
       ggshield machine scan --json       # JSON output
       ggshield machine scan --timeout 30 # Limit scan time
       ggshield machine scan -v           # Verbose output
     """
     ctx_obj = ContextObj.get(ctx)
 
+    # Show alpha warning (not in JSON mode)
+    if not ctx_obj.use_json:
+        ui.display_warning(
+            "Alpha feature: This command is under active development and may change."
+        )
+
     # Don't show progress for JSON output
     show_progress = not ctx_obj.use_json
+
+    # Create client if deep scan is enabled
+    client = None
+    if deep:
+        client = create_client_from_config(ctx_obj.config)
+        check_client_api_key(client, {TokenScope.SCAN})
 
     # Build exclusion patterns from config and CLI options
     exclusion_patterns: set[str] = set()
@@ -208,7 +241,10 @@ def scan_cmd(
     exclusion_regexes = init_exclusion_regexes(exclusion_patterns)
 
     if show_progress:
-        ui.display_info("Scanning machine for secrets...\n")
+        if deep:
+            ui.display_info("Scanning machine for secrets (deep mode)...\n")
+        else:
+            ui.display_info("Scanning machine for secrets...\n")
 
     with ScanProgressReporter(enabled=show_progress) as progress:
         config = GatheringConfig(
@@ -218,6 +254,8 @@ def scan_cmd(
             on_progress=progress.on_progress,
             on_source_complete=progress.on_source_complete,
             exclusion_regexes=exclusion_regexes,
+            deep_scan=deep,
+            client=client,
         )
 
         gatherer = MachineSecretGatherer(config)
