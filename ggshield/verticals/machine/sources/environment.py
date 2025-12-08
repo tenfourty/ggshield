@@ -40,6 +40,11 @@ EXCLUDED_ENV_KEYS = {
     "USER",
     "USERNAME",
     "_",
+    # User preference programs (paths/names, not secrets)
+    "EDITOR",
+    "VISUAL",
+    "PAGER",
+    "BROWSER",
     # XDG directories
     "XDG_CACHE_HOME",
     "XDG_CONFIG_HOME",
@@ -92,9 +97,12 @@ EXCLUDED_ENV_KEYS = {
     "STARSHIP_SESSION_KEY",
     "VSCODE_IPC_HOOK",
     "VSCODE_GIT_IPC_HANDLE",
-    # SSH/GPG (socket paths, not secrets)
+    # SSH/GPG (socket paths and connection info, not secrets)
     "SSH_AUTH_SOCK",
     "SSH_AGENT_PID",
+    "SSH_CONNECTION",
+    "SSH_CLIENT",
+    "SSH_TTY",
     "GPG_AGENT_INFO",
     # Windows system variables (paths/identifiers, not secrets)
     "ALLUSERSPROFILE",
@@ -192,6 +200,9 @@ EXCLUDED_ENV_KEYS = {
     "SNAP_REVISION",
     "SNAP_INSTANCE_NAME",
     "FLATPAK_ID",
+    # Linux debuginfo (debug symbol server URLs, not secrets)
+    "DEBUGINFOD_URLS",
+    "DEBUGINFOD_IMA_CERT_PATH",
 }
 
 # Prefixes for environment variable names that are typically not secrets
