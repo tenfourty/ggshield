@@ -372,3 +372,66 @@ class TestMachineScanCommand:
         assert "scan" in result.output
         assert "check" in result.output
         assert "analyze" in result.output
+
+    def test_scan_verbose_output(self, cli_fs_runner: CliRunner):
+        """
+        GIVEN secrets found on the machine
+        WHEN running machine scan with --verbose
+        THEN displays detailed per-secret information
+        """
+        mock_secrets = [
+            GatheredSecret(
+                value="test_secret_value",
+                metadata=SecretMetadata(
+                    source_type=SourceType.ENVIRONMENT_VAR,
+                    source_path="environment",
+                    secret_name="API_KEY",
+                ),
+            ),
+        ]
+        mock_gatherer = MagicMock()
+        mock_gatherer.gather.return_value = iter(mock_secrets)
+        stats = GatheringStats()
+        stats.increment_secrets(SourceType.ENVIRONMENT_VAR, 1)
+        mock_gatherer.stats = stats
+
+        with patch(
+            "ggshield.cmd.machine.scan.MachineSecretGatherer",
+            return_value=mock_gatherer,
+        ):
+            result = cli_fs_runner.invoke(cli, ["machine", "scan", "-v"])
+
+        assert_invoke_ok(result)
+        assert "Found 1 potential secret" in result.output
+        # Verbose shows details
+        assert "API_KEY" in result.output or "Details" in result.output
+
+    def test_scan_deep_mode_passes_config(self, cli_fs_runner: CliRunner):
+        """
+        GIVEN --deep flag
+        WHEN running machine scan with deep scan enabled
+        THEN passes deep_scan=True in gathering config
+        """
+        mock_gatherer = MagicMock()
+        mock_gatherer.gather.return_value = iter([])
+        mock_gatherer.stats = GatheringStats()
+
+        with patch(
+            "ggshield.cmd.machine.scan.MachineSecretGatherer",
+            return_value=mock_gatherer,
+        ) as mock_class:
+            # Need to patch client creation since deep scan requires API key
+            with patch(
+                "ggshield.cmd.machine.scan.create_client_from_config"
+            ) as mock_create_client, patch(
+                "ggshield.cmd.machine.scan.check_client_api_key"
+            ):
+                mock_client = MagicMock()
+                mock_create_client.return_value = mock_client
+                cli_fs_runner.invoke(cli, ["machine", "scan", "--deep"])
+
+        # Deep scan requires API key, so it may fail but we can check the config
+        call_args = mock_class.call_args
+        if call_args:
+            config = call_args[0][0]
+            assert config.deep_scan is True

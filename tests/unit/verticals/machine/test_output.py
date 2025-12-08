@@ -406,3 +406,398 @@ class TestDisplayGatheringStats:
         captured = capsys.readouterr()
         output = captured.out + captured.err  # ui module writes to stderr
         assert "Total files visited" not in output
+
+
+class TestDisplayVerboseTextResults:
+    """Tests for verbose text output formatting."""
+
+    def test_verbose_output_with_secrets(self, capsys):
+        """
+        GIVEN secrets from multiple sources
+        WHEN displaying verbose results
+        THEN shows detailed per-secret information
+        """
+        secrets = [
+            GatheredSecret(
+                value="test",
+                metadata=SecretMetadata(
+                    source_type=SourceType.ENVIRONMENT_VAR,
+                    source_path="env",
+                    secret_name="KEY",
+                ),
+            ),
+            GatheredSecret(
+                value="test2",
+                metadata=SecretMetadata(
+                    source_type=SourceType.PRIVATE_KEY,
+                    source_path="/path/to/id_rsa",
+                    secret_name="id_rsa",
+                ),
+            ),
+        ]
+
+        display_scan_results(secrets, json_output=False, verbose=True)
+
+        captured = capsys.readouterr()
+        output = captured.out + captured.err
+        assert "Found 2 potential secrets" in output
+        assert "── Summary ──" in output
+        assert "── Details ──" in output
+        assert "Environment variables" in output
+        assert "Private keys" in output
+        # Verbose shows individual secret paths
+        assert "env:KEY" in output
+        assert "/path/to/id_rsa" in output
+
+    def test_verbose_output_with_deep_scan_secrets(self, capsys):
+        """
+        GIVEN secrets from deep scan
+        WHEN displaying verbose results
+        THEN groups by detector type
+        """
+        secrets = [
+            GatheredSecret(
+                value="ghp_xxxxxxxxxxxx",
+                metadata=SecretMetadata(
+                    source_type=SourceType.DEEP_SCAN,
+                    source_path="/path/to/file.txt",
+                    secret_name="GitHub Token",
+                ),
+            ),
+            GatheredSecret(
+                value="AKIAIOSFODNN7EXAMPLE",
+                metadata=SecretMetadata(
+                    source_type=SourceType.DEEP_SCAN,
+                    source_path="/path/to/config",
+                    secret_name="AWS Access Key",
+                ),
+            ),
+        ]
+
+        display_scan_results(secrets, json_output=False, verbose=True)
+
+        captured = capsys.readouterr()
+        output = captured.out + captured.err
+        assert "Found 2 potential secrets" in output
+        assert "[GitHub Token]" in output
+        assert "[AWS Access Key]" in output
+
+
+class TestDisplayHmslCheckResults:
+    """Tests for HMSL check output formatting."""
+
+    def test_text_hmsl_no_leaked(self, capsys):
+        """
+        GIVEN secrets with none leaked
+        WHEN displaying HMSL results
+        THEN shows all clear message
+        """
+        from ggshield.verticals.machine.output import display_hmsl_check_results
+
+        secrets = [
+            GatheredSecret(
+                value="test",
+                metadata=SecretMetadata(
+                    source_type=SourceType.ENVIRONMENT_VAR,
+                    source_path="env",
+                    secret_name="KEY",
+                ),
+            ),
+        ]
+        leaked_info = {}  # No leaked secrets
+
+        display_hmsl_check_results(secrets, leaked_info, json_output=False)
+
+        captured = capsys.readouterr()
+        output = captured.out + captured.err
+        assert "No leaked secrets found" in output
+        assert "1 checked" in output
+
+    def test_text_hmsl_with_leaked(self, capsys):
+        """
+        GIVEN secrets with some leaked
+        WHEN displaying HMSL results
+        THEN shows leaked count
+        """
+        from ggshield.verticals.machine.output import (
+            LeakedSecretInfo,
+            display_hmsl_check_results,
+        )
+
+        secrets = [
+            GatheredSecret(
+                value="leaked_secret",
+                metadata=SecretMetadata(
+                    source_type=SourceType.ENVIRONMENT_VAR,
+                    source_path="env",
+                    secret_name="KEY",
+                ),
+            ),
+        ]
+        leaked_info = {
+            "KEY (env)": LeakedSecretInfo(
+                key="KEY (env)",
+                count=5,
+                url="https://example.com",
+                secret_value="leaked_secret",
+            )
+        }
+
+        display_hmsl_check_results(secrets, leaked_info, json_output=False)
+
+        captured = capsys.readouterr()
+        output = captured.out + captured.err
+        assert "Found 1 leaked secret" in output
+
+    def test_json_hmsl_output(self, capsys):
+        """
+        GIVEN secrets with leaked info
+        WHEN displaying HMSL results as JSON
+        THEN outputs valid JSON with leaked info
+        """
+        from click.testing import CliRunner
+
+        from ggshield.verticals.machine.output import (
+            LeakedSecretInfo,
+            display_hmsl_check_results,
+        )
+
+        secrets = [
+            GatheredSecret(
+                value="leaked_secret",
+                metadata=SecretMetadata(
+                    source_type=SourceType.ENVIRONMENT_VAR,
+                    source_path="env",
+                    secret_name="KEY",
+                ),
+            ),
+        ]
+        leaked_info = {
+            "KEY (env)": LeakedSecretInfo(
+                key="KEY (env)",
+                count=5,
+                url="https://example.com",
+                secret_value="leaked_secret",
+            )
+        }
+
+        runner = CliRunner()
+        with runner.isolated_filesystem():
+            display_hmsl_check_results(secrets, leaked_info, json_output=True)
+
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        assert data["secrets_checked"] == 1
+        assert data["leaked_count"] == 1
+        assert len(data["secrets"]) == 1
+        assert data["secrets"][0]["leaked"] is True
+        assert data["secrets"][0]["leak_info"]["occurrences"] == 5
+
+    def test_verbose_hmsl_with_priority_tiers(self, capsys):
+        """
+        GIVEN leaked secrets with different occurrence counts
+        WHEN displaying verbose HMSL results
+        THEN groups by priority tier
+        """
+        from ggshield.verticals.machine.output import (
+            LeakedSecretInfo,
+            display_hmsl_check_results,
+        )
+
+        secrets = [
+            GatheredSecret(
+                value="high_priority_secret",
+                metadata=SecretMetadata(
+                    source_type=SourceType.ENVIRONMENT_VAR,
+                    source_path="env",
+                    secret_name="HIGH",
+                ),
+            ),
+            GatheredSecret(
+                value="medium_priority_secret",
+                metadata=SecretMetadata(
+                    source_type=SourceType.ENVIRONMENT_VAR,
+                    source_path="env",
+                    secret_name="MEDIUM",
+                ),
+            ),
+            GatheredSecret(
+                value="not_leaked",
+                metadata=SecretMetadata(
+                    source_type=SourceType.ENVIRONMENT_VAR,
+                    source_path="env",
+                    secret_name="SAFE",
+                ),
+            ),
+        ]
+        leaked_info = {
+            "HIGH (env)": LeakedSecretInfo(
+                key="HIGH (env)",
+                count=3,  # < 10 = high priority
+                url="https://example.com",
+                secret_value="high_priority_secret",
+            ),
+            "MEDIUM (env)": LeakedSecretInfo(
+                key="MEDIUM (env)",
+                count=50,  # 10-99 = medium priority
+                url="https://example.com",
+                secret_value="medium_priority_secret",
+            ),
+        }
+
+        display_hmsl_check_results(
+            secrets, leaked_info, json_output=False, verbose=True
+        )
+
+        captured = capsys.readouterr()
+        output = captured.out + captured.err
+        assert "HIGH PRIORITY" in output
+        assert "MEDIUM PRIORITY" in output
+        assert "── Leaked Secrets ──" in output
+        assert "── Not Leaked ──" in output
+        assert "[OK]" in output  # For the non-leaked secret
+
+
+class TestDisplayAnalyzedResults:
+    """Tests for analysis output formatting."""
+
+    def test_text_analyzed_results(self, capsys):
+        """
+        GIVEN analyzed secrets
+        WHEN displaying text results
+        THEN shows summary by detector type
+        """
+        from ggshield.verticals.machine.analyzer import AnalysisResult, AnalyzedSecret
+        from ggshield.verticals.machine.output import display_analyzed_results
+
+        gathered = GatheredSecret(
+            value="ghp_xxxxxxxxxxxx",
+            metadata=SecretMetadata(
+                source_type=SourceType.GITHUB_TOKEN,
+                source_path="/path",
+                secret_name="token",
+            ),
+        )
+        analyzed = AnalyzedSecret(
+            gathered_secret=gathered,
+            detector_name="github_token",
+            detector_display_name="GitHub Token",
+            validity="valid",
+            known_secret=False,
+            incident_url=None,
+        )
+        result = AnalysisResult(
+            analyzed_secrets=[analyzed],
+            errors=[],
+        )
+
+        display_analyzed_results(result, json_output=False)
+
+        captured = capsys.readouterr()
+        output = captured.out + captured.err
+        assert "Analysis Results" in output
+        assert "1 secret" in output
+        assert "GitHub Token" in output
+        assert "valid" in output.lower()
+
+    def test_json_analyzed_results(self, capsys):
+        """
+        GIVEN analyzed secrets
+        WHEN displaying JSON results
+        THEN outputs valid JSON with analysis info
+        """
+        from click.testing import CliRunner
+
+        from ggshield.verticals.machine.analyzer import AnalysisResult, AnalyzedSecret
+        from ggshield.verticals.machine.output import display_analyzed_results
+
+        gathered = GatheredSecret(
+            value="ghp_xxxxxxxxxxxx",
+            metadata=SecretMetadata(
+                source_type=SourceType.GITHUB_TOKEN,
+                source_path="/path",
+                secret_name="token",
+            ),
+        )
+        analyzed = AnalyzedSecret(
+            gathered_secret=gathered,
+            detector_name="github_token",
+            detector_display_name="GitHub Token",
+            validity="valid",
+            known_secret=False,
+            incident_url="https://dashboard.example.com/1",
+        )
+        result = AnalysisResult(
+            analyzed_secrets=[analyzed],
+            errors=[],
+        )
+
+        runner = CliRunner()
+        with runner.isolated_filesystem():
+            display_analyzed_results(result, json_output=True)
+
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        assert data["secrets_analyzed"] == 1
+        assert data["detected_count"] == 1
+        assert len(data["secrets"]) == 1
+        assert data["secrets"][0]["detector"] == "GitHub Token"
+        assert data["secrets"][0]["validity"] == "valid"
+
+    def test_analyzed_results_with_errors(self, capsys):
+        """
+        GIVEN analysis result with errors
+        WHEN displaying text results
+        THEN shows error warnings
+        """
+        from ggshield.verticals.machine.analyzer import AnalysisResult
+        from ggshield.verticals.machine.output import display_analyzed_results
+
+        result = AnalysisResult(
+            analyzed_secrets=[],
+            errors=["API rate limit exceeded", "Network timeout"],
+        )
+
+        display_analyzed_results(result, json_output=False)
+
+        captured = capsys.readouterr()
+        output = captured.out + captured.err
+        assert "API rate limit exceeded" in output
+        assert "Network timeout" in output
+
+    def test_analyzed_results_with_known_secrets(self, capsys):
+        """
+        GIVEN analyzed secrets with some marked as known
+        WHEN displaying text results
+        THEN shows known secrets count
+        """
+        from ggshield.verticals.machine.analyzer import AnalysisResult, AnalyzedSecret
+        from ggshield.verticals.machine.output import display_analyzed_results
+
+        gathered = GatheredSecret(
+            value="ghp_xxxxxxxxxxxx",
+            metadata=SecretMetadata(
+                source_type=SourceType.GITHUB_TOKEN,
+                source_path="/path",
+                secret_name="token",
+            ),
+        )
+        analyzed = AnalyzedSecret(
+            gathered_secret=gathered,
+            detector_name="github_token",
+            detector_display_name="GitHub Token",
+            validity="valid",
+            known_secret=True,
+            incident_url="https://dashboard.example.com/1",
+        )
+        result = AnalysisResult(
+            analyzed_secrets=[analyzed],
+            errors=[],
+        )
+
+        display_analyzed_results(result, json_output=False)
+
+        captured = capsys.readouterr()
+        output = captured.out + captured.err
+        assert "Known secrets: 1" in output
+        assert "already tracked" in output
