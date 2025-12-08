@@ -4,9 +4,11 @@ Tests for GCP Application Default Credentials source.
 
 import json
 from pathlib import Path
+from unittest.mock import patch
 
 from ggshield.verticals.machine.sources import SourceType
 from ggshield.verticals.machine.sources.gcp_adc import GcpAdcSource
+from ggshield.verticals.machine.sources.platform_paths import get_os_name
 
 
 class TestGcpAdcSource:
@@ -112,5 +114,65 @@ class TestGcpAdcSource:
 
         source = GcpAdcSource(home_dir=tmp_path)
         secrets = list(source.gather())
+
+        assert len(secrets) == 0
+
+    def test_gather_windows_path(self, tmp_path: Path):
+        """
+        GIVEN running on Windows with ADC file in APPDATA
+        WHEN gathering secrets
+        THEN finds the config in Windows location
+        """
+        appdata = tmp_path / "AppData" / "Roaming"
+        gcloud_dir = appdata / "gcloud"
+        gcloud_dir.mkdir(parents=True)
+        adc_content = {
+            "client_id": "123456789.apps.googleusercontent.com",
+            "client_secret": "GOCSPX-windows-secret",
+            "refresh_token": "1//windows_refresh_token",
+            "type": "authorized_user",
+        }
+        (gcloud_dir / "application_default_credentials.json").write_text(
+            json.dumps(adc_content)
+        )
+
+        with (
+            patch(
+                "ggshield.verticals.machine.sources.gcp_adc.is_windows",
+                return_value=True,
+            ),
+            patch(
+                "ggshield.verticals.machine.sources.gcp_adc.get_appdata",
+                return_value=appdata,
+            ),
+        ):
+            get_os_name.cache_clear()
+            source = GcpAdcSource(home_dir=tmp_path)
+            secrets = list(source.gather())
+
+        assert len(secrets) == 2
+        values = {s.value for s in secrets}
+        assert "GOCSPX-windows-secret" in values
+        assert "1//windows_refresh_token" in values
+
+    def test_gather_windows_no_appdata(self, tmp_path: Path):
+        """
+        GIVEN running on Windows without APPDATA set
+        WHEN gathering secrets
+        THEN yields nothing gracefully
+        """
+        with (
+            patch(
+                "ggshield.verticals.machine.sources.gcp_adc.is_windows",
+                return_value=True,
+            ),
+            patch(
+                "ggshield.verticals.machine.sources.gcp_adc.get_appdata",
+                return_value=None,
+            ),
+        ):
+            get_os_name.cache_clear()
+            source = GcpAdcSource(home_dir=tmp_path)
+            secrets = list(source.gather())
 
         assert len(secrets) == 0

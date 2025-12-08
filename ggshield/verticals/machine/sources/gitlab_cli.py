@@ -2,6 +2,7 @@
 GitLab CLI (glab) configuration source.
 
 Scans ~/.config/glab-cli/config.yml for API tokens.
+On Windows, scans %APPDATA%/glab-cli/config.yml instead.
 """
 
 import re
@@ -14,6 +15,7 @@ from ggshield.verticals.machine.sources import (
     SourceType,
 )
 from ggshield.verticals.machine.sources.base import SecretSource
+from ggshield.verticals.machine.sources.platform_paths import get_appdata, is_windows
 
 
 # Pattern to match token in YAML
@@ -38,6 +40,15 @@ class GitLabCliSource(SecretSource):
     def source_type(self) -> SourceType:
         return SourceType.GITLAB_CLI
 
+    def _get_config_path(self) -> Optional[Path]:
+        """Get the config file path based on the current platform."""
+        if is_windows():
+            appdata = get_appdata()
+            if appdata:
+                return appdata / "glab-cli" / "config.yml"
+            return None
+        return self._home_dir / ".config" / "glab-cli" / "config.yml"
+
     def gather(self) -> Iterator[GatheredSecret]:
         """
         Yield secrets from GitLab CLI config.
@@ -50,8 +61,8 @@ class GitLabCliSource(SecretSource):
           gitlab.example.com:
             token: <token>
         """
-        config_path = self._home_dir / ".config" / "glab-cli" / "config.yml"
-        if not config_path.exists() or not config_path.is_file():
+        config_path = self._get_config_path()
+        if config_path is None or not config_path.exists() or not config_path.is_file():
             return
 
         try:

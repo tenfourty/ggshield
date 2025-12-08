@@ -167,6 +167,31 @@ EXCLUDED_ENV_KEYS = {
     "TRAVIS",
     "JENKINS_URL",
     "BUILD_NUMBER",
+    # Linux/systemd specific
+    "INVOCATION_ID",
+    "JOURNAL_STREAM",
+    "MANAGERPID",
+    "NOTIFY_SOCKET",
+    "SYSTEMD_EXEC_PID",
+    # D-Bus (Linux)
+    "DBUS_SESSION_BUS_ADDRESS",
+    "DBUS_STARTER_ADDRESS",
+    "DBUS_STARTER_BUS_TYPE",
+    # Wayland/X11 display (not secrets)
+    "WAYLAND_DISPLAY",
+    "DISPLAY",
+    "XDG_SESSION_TYPE",
+    "XDG_CURRENT_DESKTOP",
+    "DESKTOP_SESSION",
+    "GDK_BACKEND",
+    "QT_QPA_PLATFORM",
+    "QT_QPA_PLATFORMTHEME",
+    # Snap/Flatpak (Linux package managers)
+    "SNAP",
+    "SNAP_NAME",
+    "SNAP_REVISION",
+    "SNAP_INSTANCE_NAME",
+    "FLATPAK_ID",
 }
 
 # Prefixes for environment variable names that are typically not secrets
@@ -176,6 +201,9 @@ EXCLUDED_ENV_PREFIXES = (
     "XDG_",  # XDG Base Directory
     "LESS",  # Less pager config
     "LS_",  # ls command config
+    "DBUS_",  # D-Bus configuration (Linux)
+    "SYSTEMD_",  # systemd-related (Linux)
+    "SNAP_",  # Snap package manager (Linux)
 )
 
 

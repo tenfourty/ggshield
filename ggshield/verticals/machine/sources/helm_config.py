@@ -2,6 +2,7 @@
 Helm registry configuration source.
 
 Scans ~/.config/helm/registry/config.json for OCI registry credentials.
+On Windows, scans %APPDATA%/helm/registry/config.json instead.
 """
 
 import base64
@@ -15,6 +16,7 @@ from ggshield.verticals.machine.sources import (
     SourceType,
 )
 from ggshield.verticals.machine.sources.base import SecretSource
+from ggshield.verticals.machine.sources.platform_paths import get_appdata, is_windows
 
 
 class HelmConfigSource(SecretSource):
@@ -33,14 +35,23 @@ class HelmConfigSource(SecretSource):
     def source_type(self) -> SourceType:
         return SourceType.HELM_CONFIG
 
+    def _get_config_path(self) -> Optional[Path]:
+        """Get the config file path based on the current platform."""
+        if is_windows():
+            appdata = get_appdata()
+            if appdata:
+                return appdata / "helm" / "registry" / "config.json"
+            return None
+        return self._home_dir / ".config" / "helm" / "registry" / "config.json"
+
     def gather(self) -> Iterator[GatheredSecret]:
         """
         Yield secrets from Helm registry config.
 
         Uses same format as Docker config.json with base64-encoded auth.
         """
-        config_path = self._home_dir / ".config" / "helm" / "registry" / "config.json"
-        if not config_path.exists() or not config_path.is_file():
+        config_path = self._get_config_path()
+        if config_path is None or not config_path.exists() or not config_path.is_file():
             return
 
         try:

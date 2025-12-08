@@ -2,6 +2,10 @@
 Raycast configuration source.
 
 Scans ~/.config/raycast/ for API keys and OAuth tokens.
+On Windows, scans %APPDATA%/raycast/ instead.
+
+Note: Raycast is macOS-only, but we still support platform-aware paths
+for consistency and potential future cross-platform support.
 """
 
 import json
@@ -14,6 +18,7 @@ from ggshield.verticals.machine.sources import (
     SourceType,
 )
 from ggshield.verticals.machine.sources.base import SecretSource
+from ggshield.verticals.machine.sources.platform_paths import get_appdata, is_windows
 
 
 class RaycastConfigSource(SecretSource):
@@ -32,15 +37,25 @@ class RaycastConfigSource(SecretSource):
     def source_type(self) -> SourceType:
         return SourceType.RAYCAST_CONFIG
 
+    def _get_config_dir(self) -> Optional[Path]:
+        """Get the config directory path based on the current platform."""
+        if is_windows():
+            appdata = get_appdata()
+            if appdata:
+                return appdata / "raycast"
+            return None
+        return self._home_dir / ".config" / "raycast"
+
     def gather(self) -> Iterator[GatheredSecret]:
         """
         Yield secrets from Raycast config files.
 
         Checks:
         - ~/.config/raycast/config.json (OAuth tokens, extension API keys)
+        - %APPDATA%/raycast/config.json (Windows)
         """
-        config_dir = self._home_dir / ".config" / "raycast"
-        if not config_dir.exists() or not config_dir.is_dir():
+        config_dir = self._get_config_dir()
+        if config_dir is None or not config_dir.exists() or not config_dir.is_dir():
             return
 
         # Check config.json

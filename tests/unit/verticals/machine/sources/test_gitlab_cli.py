@@ -3,9 +3,11 @@ Tests for GitLab CLI (glab) config source.
 """
 
 from pathlib import Path
+from unittest.mock import patch
 
 from ggshield.verticals.machine.sources import SourceType
 from ggshield.verticals.machine.sources.gitlab_cli import GitLabCliSource
+from ggshield.verticals.machine.sources.platform_paths import get_os_name
 
 
 class TestGitLabCliSource:
@@ -151,5 +153,61 @@ protocol: ssh
 
         source = GitLabCliSource(home_dir=tmp_path)
         secrets = list(source.gather())
+
+        assert len(secrets) == 0
+
+    def test_gather_windows_path(self, tmp_path: Path):
+        """
+        GIVEN running on Windows with glab config in APPDATA
+        WHEN gathering secrets
+        THEN finds the config in Windows location
+        """
+        appdata = tmp_path / "AppData" / "Roaming"
+        glab_dir = appdata / "glab-cli"
+        glab_dir.mkdir(parents=True)
+        config_content = """hosts:
+  gitlab.com:
+    token: glpat-windows-token-123
+    git_protocol: ssh
+"""
+        (glab_dir / "config.yml").write_text(config_content)
+
+        with (
+            patch(
+                "ggshield.verticals.machine.sources.gitlab_cli.is_windows",
+                return_value=True,
+            ),
+            patch(
+                "ggshield.verticals.machine.sources.gitlab_cli.get_appdata",
+                return_value=appdata,
+            ),
+        ):
+            get_os_name.cache_clear()
+            source = GitLabCliSource(home_dir=tmp_path)
+            secrets = list(source.gather())
+
+        assert len(secrets) == 1
+        assert secrets[0].value == "glpat-windows-token-123"
+        assert secrets[0].metadata.source_type == SourceType.GITLAB_CLI
+
+    def test_gather_windows_no_appdata(self, tmp_path: Path):
+        """
+        GIVEN running on Windows without APPDATA set
+        WHEN gathering secrets
+        THEN yields nothing gracefully
+        """
+        with (
+            patch(
+                "ggshield.verticals.machine.sources.gitlab_cli.is_windows",
+                return_value=True,
+            ),
+            patch(
+                "ggshield.verticals.machine.sources.gitlab_cli.get_appdata",
+                return_value=None,
+            ),
+        ):
+            get_os_name.cache_clear()
+            source = GitLabCliSource(home_dir=tmp_path)
+            secrets = list(source.gather())
 
         assert len(secrets) == 0

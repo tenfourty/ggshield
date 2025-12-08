@@ -2,6 +2,7 @@
 Google Cloud Platform Application Default Credentials source.
 
 Scans ~/.config/gcloud/application_default_credentials.json for OAuth tokens.
+On Windows, scans %APPDATA%/gcloud/application_default_credentials.json instead.
 """
 
 import json
@@ -14,6 +15,7 @@ from ggshield.verticals.machine.sources import (
     SourceType,
 )
 from ggshield.verticals.machine.sources.base import SecretSource
+from ggshield.verticals.machine.sources.platform_paths import get_appdata, is_windows
 
 
 class GcpAdcSource(SecretSource):
@@ -32,19 +34,28 @@ class GcpAdcSource(SecretSource):
     def source_type(self) -> SourceType:
         return SourceType.GCP_ADC
 
+    def _get_adc_path(self) -> Optional[Path]:
+        """Get the ADC file path based on the current platform."""
+        if is_windows():
+            appdata = get_appdata()
+            if appdata:
+                return appdata / "gcloud" / "application_default_credentials.json"
+            return None
+        return (
+            self._home_dir
+            / ".config"
+            / "gcloud"
+            / "application_default_credentials.json"
+        )
+
     def gather(self) -> Iterator[GatheredSecret]:
         """
         Yield secrets from GCP ADC file.
 
         The file contains OAuth credentials with client_secret and refresh_token.
         """
-        adc_path = (
-            self._home_dir
-            / ".config"
-            / "gcloud"
-            / "application_default_credentials.json"
-        )
-        if not adc_path.exists() or not adc_path.is_file():
+        adc_path = self._get_adc_path()
+        if adc_path is None or not adc_path.exists() or not adc_path.is_file():
             return
 
         try:

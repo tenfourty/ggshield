@@ -2,6 +2,7 @@
 Joplin configuration source.
 
 Scans ~/.config/joplin-desktop/settings.json for cloud sync tokens.
+On Windows, scans %APPDATA%/joplin-desktop/settings.json instead.
 """
 
 import json
@@ -14,6 +15,7 @@ from ggshield.verticals.machine.sources import (
     SourceType,
 )
 from ggshield.verticals.machine.sources.base import SecretSource
+from ggshield.verticals.machine.sources.platform_paths import get_appdata, is_windows
 
 
 class JoplinConfigSource(SecretSource):
@@ -32,15 +34,25 @@ class JoplinConfigSource(SecretSource):
     def source_type(self) -> SourceType:
         return SourceType.JOPLIN_CONFIG
 
+    def _get_config_dir(self) -> Optional[Path]:
+        """Get the config directory path based on the current platform."""
+        if is_windows():
+            appdata = get_appdata()
+            if appdata:
+                return appdata / "joplin-desktop"
+            return None
+        return self._home_dir / ".config" / "joplin-desktop"
+
     def gather(self) -> Iterator[GatheredSecret]:
         """
         Yield secrets from Joplin config files.
 
         Checks:
         - ~/.config/joplin-desktop/settings.json (cloud sync tokens)
+        - %APPDATA%/joplin-desktop/settings.json (Windows)
         """
-        config_dir = self._home_dir / ".config" / "joplin-desktop"
-        if not config_dir.exists() or not config_dir.is_dir():
+        config_dir = self._get_config_dir()
+        if config_dir is None or not config_dir.exists() or not config_dir.is_dir():
             return
 
         # Check settings.json

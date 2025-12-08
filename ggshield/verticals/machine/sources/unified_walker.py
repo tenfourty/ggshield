@@ -43,11 +43,15 @@ IGNORED_DIRECTORIES = {
     "build",
     "target",
     "_build",
-    # Caches (typically large, low value)
+    # Caches (typically large, low value) - macOS
     ".cache",
     ".local/share/Trash",
     ".Trash",
     "Library/Caches",
+    # Caches - Windows (under user home, e.g., C:\Users\<user>\AppData)
+    "AppData/Local/Temp",
+    "AppData/Local/Microsoft/Windows/INetCache",
+    "AppData/Local/pip/cache",
     # Application caches with low credential value
     ".gradle/caches",
     ".m2/repository",
