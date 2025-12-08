@@ -67,11 +67,11 @@ class TestMachineScanCommand:
         ]
         mock_gatherer = MagicMock()
         mock_gatherer.gather.return_value = iter(mock_secrets)
-        mock_gatherer.stats = GatheringStats(
-            env_vars_count=1,
-            npmrc_files=1,
-            npmrc_secrets=1,
-        )
+        stats = GatheringStats()
+        stats.increment_secrets(SourceType.ENVIRONMENT_VAR, 1)
+        stats.increment_files(SourceType.NPMRC, 1)
+        stats.increment_secrets(SourceType.NPMRC, 1)
+        mock_gatherer.stats = stats
 
         with patch(
             "ggshield.cmd.machine.scan.MachineSecretGatherer",
@@ -145,17 +145,18 @@ class TestMachineScanCommand:
         ]
         mock_gatherer = MagicMock()
         mock_gatherer.gather.return_value = iter(mock_secrets)
-        mock_gatherer.stats = GatheringStats(
-            env_vars_count=5,
-            npmrc_files=1,
-            npmrc_secrets=2,
-            env_files=3,
-            env_secrets=4,
-            private_key_files=1,
-            private_key_secrets=1,
+        stats = GatheringStats(
             total_files_visited=50,
             elapsed_seconds=1.5,
         )
+        stats.increment_secrets(SourceType.ENVIRONMENT_VAR, 5)
+        stats.increment_files(SourceType.NPMRC, 1)
+        stats.increment_secrets(SourceType.NPMRC, 2)
+        stats.increment_files(SourceType.ENV_FILE, 3)
+        stats.increment_secrets(SourceType.ENV_FILE, 4)
+        stats.increment_files(SourceType.PRIVATE_KEY, 1)
+        stats.increment_secrets(SourceType.PRIVATE_KEY, 1)
+        mock_gatherer.stats = stats
 
         with patch(
             "ggshield.cmd.machine.scan.MachineSecretGatherer",
@@ -185,7 +186,9 @@ class TestMachineScanCommand:
         ]
         mock_gatherer = MagicMock()
         mock_gatherer.gather.return_value = iter(mock_secrets)
-        mock_gatherer.stats = GatheringStats(env_vars_count=1)
+        stats = GatheringStats()
+        stats.increment_secrets(SourceType.ENVIRONMENT_VAR, 1)
+        mock_gatherer.stats = stats
 
         with patch(
             "ggshield.cmd.machine.scan.MachineSecretGatherer",

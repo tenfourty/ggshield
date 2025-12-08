@@ -59,14 +59,14 @@ class TestGatheringStats:
         """
         stats = GatheringStats()
 
-        assert stats.env_vars_count == 0
+        assert stats.get_secrets(SourceType.ENVIRONMENT_VAR) == 0
         assert stats.github_token_found is False
-        assert stats.npmrc_files == 0
-        assert stats.npmrc_secrets == 0
-        assert stats.env_files == 0
-        assert stats.env_secrets == 0
-        assert stats.private_key_files == 0
-        assert stats.private_key_secrets == 0
+        assert stats.get_files(SourceType.NPMRC) == 0
+        assert stats.get_secrets(SourceType.NPMRC) == 0
+        assert stats.get_files(SourceType.ENV_FILE) == 0
+        assert stats.get_secrets(SourceType.ENV_FILE) == 0
+        assert stats.get_files(SourceType.PRIVATE_KEY) == 0
+        assert stats.get_secrets(SourceType.PRIVATE_KEY) == 0
         assert stats.total_files_visited == 0
         assert stats.elapsed_seconds == 0.0
         assert stats.timed_out is False
@@ -92,7 +92,7 @@ class TestMachineSecretGatherer:
             s for s in secrets if s.metadata.source_type == SourceType.ENVIRONMENT_VAR
         ]
         assert len(env_secrets) == 1
-        assert gatherer.stats.env_vars_count == 1
+        assert gatherer.stats.get_secrets(SourceType.ENVIRONMENT_VAR) == 1
 
     def test_gather_filters_short_values(self, tmp_path: Path):
         """
@@ -132,8 +132,8 @@ class TestMachineSecretGatherer:
             s for s in secrets if s.metadata.source_type == SourceType.NPMRC
         ]
         assert len(npmrc_secrets) == 1
-        assert gatherer.stats.npmrc_files == 1
-        assert gatherer.stats.npmrc_secrets == 1
+        assert gatherer.stats.get_files(SourceType.NPMRC) == 1
+        assert gatherer.stats.get_secrets(SourceType.NPMRC) == 1
 
     def test_gather_from_env_files(self, tmp_path: Path):
         """
@@ -152,8 +152,8 @@ class TestMachineSecretGatherer:
             s for s in secrets if s.metadata.source_type == SourceType.ENV_FILE
         ]
         assert len(env_file_secrets) == 1
-        assert gatherer.stats.env_files >= 1
-        assert gatherer.stats.env_secrets >= 1
+        assert gatherer.stats.get_files(SourceType.ENV_FILE) >= 1
+        assert gatherer.stats.get_secrets(SourceType.ENV_FILE) >= 1
 
     def test_gather_from_private_keys(self, tmp_path: Path):
         """
@@ -177,7 +177,7 @@ MIIEowIBAAKCAQEA0Z3VS5JJcds3xfn/ygWyF8PbnGy0AHB7MBAuMfB6JaALzdGk
             s for s in secrets if s.metadata.source_type == SourceType.PRIVATE_KEY
         ]
         assert len(key_secrets) == 1
-        assert gatherer.stats.private_key_files == 1
+        assert gatherer.stats.get_files(SourceType.PRIVATE_KEY) == 1
 
     def test_gather_with_timeout(self, tmp_path: Path):
         """
@@ -225,12 +225,12 @@ MIIEowIBAAKCAQEA0Z3VS5JJcds3xfn/ygWyF8PbnGy0AHB7MBAuMfB6JaALzdGk
             list(gatherer.gather())
 
         stats = gatherer.stats
-        assert stats.env_vars_count >= 1
-        assert stats.npmrc_files == 1
-        assert stats.npmrc_secrets == 1
-        assert stats.env_files >= 1
-        assert stats.env_secrets >= 1
-        assert stats.private_key_files == 1
+        assert stats.get_secrets(SourceType.ENVIRONMENT_VAR) >= 1
+        assert stats.get_files(SourceType.NPMRC) == 1
+        assert stats.get_secrets(SourceType.NPMRC) == 1
+        assert stats.get_files(SourceType.ENV_FILE) >= 1
+        assert stats.get_secrets(SourceType.ENV_FILE) >= 1
+        assert stats.get_files(SourceType.PRIVATE_KEY) == 1
         assert stats.elapsed_seconds > 0
 
     def test_gather_empty_home_dir(self, tmp_path: Path):

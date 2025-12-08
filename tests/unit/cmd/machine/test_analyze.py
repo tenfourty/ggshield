@@ -113,7 +113,7 @@ class TestMachineAnalyzeCommand:
         ]
         mock_gatherer = MagicMock()
         mock_gatherer.gather.return_value = iter(mock_secrets)
-        mock_gatherer.stats = GatheringStats(env_vars_count=1)
+        mock_gatherer.stats = GatheringStats()
 
         mock_client = MagicMock()
         mock_client.multi_content_scan.return_value = MultiScanResult(
@@ -169,7 +169,7 @@ class TestMachineAnalyzeCommand:
         ]
         mock_gatherer = MagicMock()
         mock_gatherer.gather.return_value = iter(mock_secrets)
-        mock_gatherer.stats = GatheringStats(env_vars_count=1)
+        mock_gatherer.stats = GatheringStats()
 
         mock_client = MagicMock()
         mock_client.multi_content_scan.return_value = MultiScanResult(
@@ -211,7 +211,7 @@ class TestMachineAnalyzeCommand:
         ]
         mock_gatherer = MagicMock()
         mock_gatherer.gather.return_value = iter(mock_secrets)
-        mock_gatherer.stats = GatheringStats(env_vars_count=1)
+        mock_gatherer.stats = GatheringStats()
 
         mock_client = MagicMock()
         mock_client.multi_content_scan.return_value = MultiScanResult(
@@ -292,7 +292,7 @@ class TestMachineAnalyzeCommand:
         ]
         mock_gatherer = MagicMock()
         mock_gatherer.gather.return_value = iter(mock_secrets)
-        mock_gatherer.stats = GatheringStats(env_vars_count=1)
+        mock_gatherer.stats = GatheringStats()
 
         mock_client = MagicMock()
         mock_client.multi_content_scan.return_value = MultiScanResult(
@@ -349,7 +349,7 @@ class TestMachineAnalyzeCommand:
         ]
         mock_gatherer = MagicMock()
         mock_gatherer.gather.return_value = iter(mock_secrets)
-        mock_gatherer.stats = GatheringStats(env_vars_count=1)
+        mock_gatherer.stats = GatheringStats()
 
         mock_client = MagicMock()
         mock_client.multi_content_scan.return_value = MultiScanResult(

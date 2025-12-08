@@ -61,7 +61,7 @@ class TestMachineCheckCommand:
         ]
         mock_gatherer = MagicMock()
         mock_gatherer.gather.return_value = iter(mock_secrets)
-        mock_gatherer.stats = GatheringStats(env_vars_count=1)
+        mock_gatherer.stats = GatheringStats()
 
         with patch(
             "ggshield.cmd.machine.check.MachineSecretGatherer",
@@ -94,7 +94,7 @@ class TestMachineCheckCommand:
         ]
         mock_gatherer = MagicMock()
         mock_gatherer.gather.return_value = iter(mock_secrets)
-        mock_gatherer.stats = GatheringStats(env_vars_count=1)
+        mock_gatherer.stats = GatheringStats()
 
         with patch(
             "ggshield.cmd.machine.check.MachineSecretGatherer",
@@ -214,7 +214,7 @@ class TestMachineCheckCommand:
         ]
         mock_gatherer = MagicMock()
         mock_gatherer.gather.return_value = iter(mock_secrets)
-        mock_gatherer.stats = GatheringStats(env_vars_count=1)
+        mock_gatherer.stats = GatheringStats()
 
         with patch(
             "ggshield.cmd.machine.check.MachineSecretGatherer",
@@ -248,7 +248,7 @@ class TestMachineCheckCommand:
         ]
         mock_gatherer = MagicMock()
         mock_gatherer.gather.return_value = iter(mock_secrets)
-        mock_gatherer.stats = GatheringStats(env_vars_count=1)
+        mock_gatherer.stats = GatheringStats()
 
         # The check_secrets function handles display, so we just verify it's called
         with patch(

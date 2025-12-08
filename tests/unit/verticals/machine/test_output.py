@@ -309,17 +309,18 @@ class TestDisplayGatheringStats:
         THEN shows all source information
         """
         stats = GatheringStats(
-            env_vars_count=5,
             github_token_found=True,
-            npmrc_files=1,
-            npmrc_secrets=2,
-            env_files=3,
-            env_secrets=4,
-            private_key_files=2,
-            private_key_secrets=2,
             total_files_visited=1000,
             elapsed_seconds=5.5,
         )
+        # Set counts using the new dict-based approach
+        stats.increment_secrets(SourceType.ENVIRONMENT_VAR, 5)
+        stats.increment_files(SourceType.NPMRC, 1)
+        stats.increment_secrets(SourceType.NPMRC, 2)
+        stats.increment_files(SourceType.ENV_FILE, 3)
+        stats.increment_secrets(SourceType.ENV_FILE, 4)
+        stats.increment_files(SourceType.PRIVATE_KEY, 2)
+        stats.increment_secrets(SourceType.PRIVATE_KEY, 2)
 
         display_gathering_stats(stats, json_output=False)
 
@@ -354,7 +355,8 @@ class TestDisplayGatheringStats:
         WHEN displaying gathering stats
         THEN shows 'no .npmrc found'
         """
-        stats = GatheringStats(npmrc_files=0)
+        stats = GatheringStats()
+        # npmrc_files defaults to 0 with the new dict-based approach
 
         display_gathering_stats(stats, json_output=False)
 
@@ -382,7 +384,8 @@ class TestDisplayGatheringStats:
         WHEN displaying gathering stats
         THEN outputs nothing (JSON is handled elsewhere)
         """
-        stats = GatheringStats(env_vars_count=5)
+        stats = GatheringStats()
+        stats.increment_secrets(SourceType.ENVIRONMENT_VAR, 5)
 
         display_gathering_stats(stats, json_output=True)
 

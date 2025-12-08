@@ -249,26 +249,32 @@ def display_gathering_stats(stats: GatheringStats, json_output: bool = False) ->
 
     ui.display_info("")
     ui.display_info("Sources scanned:")
-    ui.display_info(f"  Environment variables: {stats.env_vars_count}")
+    ui.display_info(
+        f"  Environment variables: {stats.get_secrets(SourceType.ENVIRONMENT_VAR)}"
+    )
     ui.display_info(
         f"  GitHub token: {'found' if stats.github_token_found else 'not found'}"
     )
 
-    if stats.npmrc_files > 0:
+    npmrc_files = stats.get_files(SourceType.NPMRC)
+    npmrc_secrets = stats.get_secrets(SourceType.NPMRC)
+    if npmrc_files > 0:
         ui.display_info(
-            f"  NPM configuration: {stats.npmrc_files} file, "
-            f"{stats.npmrc_secrets} {pluralize('secret', stats.npmrc_secrets)}"
+            f"  NPM configuration: {npmrc_files} file, "
+            f"{npmrc_secrets} {pluralize('secret', npmrc_secrets)}"
         )
     else:
         ui.display_info("  NPM configuration: no .npmrc found")
 
+    env_files = stats.get_files(SourceType.ENV_FILE)
+    env_secrets = stats.get_secrets(SourceType.ENV_FILE)
     ui.display_info(
-        f"  Environment files: {stats.env_files} {pluralize('file', stats.env_files)}, "
-        f"{stats.env_secrets} {pluralize('secret', stats.env_secrets)}"
+        f"  Environment files: {env_files} {pluralize('file', env_files)}, "
+        f"{env_secrets} {pluralize('secret', env_secrets)}"
     )
-    ui.display_info(
-        f"  Private keys: {stats.private_key_files} {pluralize('file', stats.private_key_files)}"
-    )
+
+    key_files = stats.get_files(SourceType.PRIVATE_KEY)
+    ui.display_info(f"  Private keys: {key_files} {pluralize('file', key_files)}")
 
     if stats.total_files_visited > 0:
         ui.display_info(
