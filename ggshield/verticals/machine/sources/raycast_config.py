@@ -60,7 +60,7 @@ class RaycastConfigSource(SecretSource):
         except json.JSONDecodeError:
             return
 
-        # Look for OAuth tokens
+        # Look for OAuth tokens at root level
         token_fields = [
             "access_token",
             "accessToken",
@@ -71,17 +71,9 @@ class RaycastConfigSource(SecretSource):
             "api_key",
             "apiKey",
         ]
-        yield from self._extract_tokens(config, config_path, token_fields)
-
-        # Recursively search for tokens in nested structures
-        yield from self._search_nested(config, config_path)
-
-    def _extract_tokens(
-        self, data: dict, config_path: Path, token_fields: list
-    ) -> Iterator[GatheredSecret]:
-        """Extract known token fields from a dict."""
+        extracted_keys: set[str] = set()
         for field in token_fields:
-            value = data.get(field)
+            value = config.get(field)
             if value and isinstance(value, str) and len(value) > 5:
                 yield GatheredSecret(
                     value=value,
@@ -91,17 +83,35 @@ class RaycastConfigSource(SecretSource):
                         secret_name=field,
                     ),
                 )
+                extracted_keys.add(field)
+
+        # Recursively search for tokens in nested structures
+        # Pass extracted_keys to avoid duplicates at root level
+        yield from self._search_nested(
+            config, config_path, extracted_keys=extracted_keys
+        )
 
     def _search_nested(
-        self, data: dict, config_path: Path, max_depth: int = 5
+        self,
+        data: dict,
+        config_path: Path,
+        max_depth: int = 5,
+        extracted_keys: set | None = None,
     ) -> Iterator[GatheredSecret]:
         """Recursively search for token-like fields in nested structures."""
         if max_depth <= 0:
             return
 
+        if extracted_keys is None:
+            extracted_keys = set()
+
         secret_key_patterns = ["token", "key", "secret", "password", "credential"]
 
         for key, value in data.items():
+            # Skip keys already extracted at root level
+            if key in extracted_keys:
+                continue
+
             key_lower = key.lower()
 
             # Check if this key looks like it contains a secret
@@ -116,7 +126,7 @@ class RaycastConfigSource(SecretSource):
                         ),
                     )
 
-            # Recurse into nested dicts
+            # Recurse into nested dicts (don't pass extracted_keys - only for root level)
             if isinstance(value, dict):
                 yield from self._search_nested(value, config_path, max_depth - 1)
             elif isinstance(value, list):
