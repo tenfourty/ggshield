@@ -16,6 +16,11 @@ from ggshield.core.filter import init_exclusion_regexes
 from ggshield.utils.files import is_path_excluded
 from ggshield.verticals.machine.sources import GatheredSecret, SourceType
 from ggshield.verticals.machine.sources.file_matcher import FileMatcher
+from ggshield.verticals.machine.sources.platform_paths import (
+    is_linux,
+    is_macos,
+    is_windows,
+)
 
 
 # Directories to ignore during traversal (ignore-list approach for comprehensive scanning)
@@ -122,6 +127,77 @@ def get_default_exclusion_regexes() -> frozenset:
     return frozenset(init_exclusion_regexes(DEFAULT_EXCLUSION_PATTERNS))
 
 
+# Platform-specific directories to exclude in full-disk mode
+# These are system directories that don't contain user secrets
+
+FULL_DISK_EXCLUSIONS_LINUX = frozenset(
+    {
+        "/proc",  # Virtual filesystem - kernel/process info
+        "/sys",  # Kernel sysfs - hardware/driver info
+        "/dev",  # Device files
+        "/run",  # Runtime data (PIDs, sockets)
+        "/boot",  # Bootloader and kernel images
+        "/snap",  # Snap package mounts
+        "/var/cache",  # Package manager caches
+        "/var/log",  # System log files
+        "/var/tmp",  # Temporary files
+        "/usr/lib",  # System libraries
+        "/usr/share",  # Shared data (docs, icons)
+        "/lib",  # Essential libraries
+        "/lib64",  # 64-bit libraries
+        "/lib32",  # 32-bit libraries (if present)
+        "/lost+found",  # Filesystem recovery
+    }
+)
+
+FULL_DISK_EXCLUSIONS_WINDOWS = frozenset(
+    {
+        # Note: These are directory names, not full paths, for simpler matching
+        "Windows",  # C:\Windows
+        "Program Files",  # C:\Program Files
+        "Program Files (x86)",  # C:\Program Files (x86)
+        "System Volume Information",  # Restore points
+        "$Recycle.Bin",  # Recycle bin
+        "PerfLogs",  # Performance logs
+        "Recovery",  # System recovery
+        "$WinREAgent",  # Windows Recovery Agent
+        "$SysReset",  # System reset data
+    }
+)
+
+FULL_DISK_EXCLUSIONS_MACOS = frozenset(
+    {
+        "/System",  # macOS system files (SIP protected)
+        "/Library/Caches",  # System-wide caches
+        "/private/var/folders",  # Temporary caches
+        "/private/var/log",  # System logs
+        "/private/var/db",  # System databases
+        "/Volumes",  # Other mounted volumes (avoid recursive mounts)
+        "/cores",  # Core dumps
+        ".Spotlight-V100",  # Spotlight index
+        ".fseventsd",  # FSEvents data
+        ".Trashes",  # Trash directories
+        ".DocumentRevisions-V100",  # Document versioning
+        ".TemporaryItems",  # Temporary items
+    }
+)
+
+
+def get_full_disk_exclusions() -> frozenset:
+    """Get platform-specific exclusions for full-disk scanning.
+
+    Returns:
+        Set of directory paths/names to exclude during full-disk scans.
+    """
+    if is_macos():
+        return FULL_DISK_EXCLUSIONS_MACOS
+    elif is_windows():
+        return FULL_DISK_EXCLUSIONS_WINDOWS
+    elif is_linux():
+        return FULL_DISK_EXCLUSIONS_LINUX
+    return frozenset()
+
+
 # Progress update interval in seconds
 PROGRESS_INTERVAL_SECONDS = 0.2
 
@@ -168,6 +244,8 @@ class WalkerConfig:
     on_progress: Optional[WalkerProgressCallback] = None
     # Callback for collecting files for deep scan (API-based scanning)
     on_candidate_file: Optional[CandidateFileCallback] = None
+    # Enable platform-specific exclusions for full-disk scanning
+    full_disk_mode: bool = False
 
 
 class UnifiedFileSystemWalker:
@@ -191,6 +269,11 @@ class UnifiedFileSystemWalker:
         # Merge default exclusions with user-provided ones
         self._all_exclusion_regexes: Set[Pattern[str]] = set(config.exclusion_regexes)
         self._all_exclusion_regexes.update(get_default_exclusion_regexes())
+
+        # Cache platform-specific exclusions if in full-disk mode
+        self._full_disk_exclusions = (
+            get_full_disk_exclusions() if config.full_disk_mode else frozenset()
+        )
 
         # Initialize match counts for each matcher's source type
         for matcher in config.matchers:
@@ -218,7 +301,7 @@ class UnifiedFileSystemWalker:
                 return
 
             # Prune directories we don't want to traverse
-            self._prune_directories(dirs)
+            self._prune_directories(dirs, root)
 
             # Process files with string-based matching first (PERF: no Path creation)
             for filename in files:
@@ -257,7 +340,7 @@ class UnifiedFileSystemWalker:
                         if not is_path_excluded(file_path, self._all_exclusion_regexes):
                             self.config.on_candidate_file(file_path)
 
-    def _prune_directories(self, dirs: List[str]) -> None:
+    def _prune_directories(self, dirs: List[str], current_root: str = "") -> None:
         """
         Remove directories we should skip from the traversal list.
 
@@ -267,12 +350,35 @@ class UnifiedFileSystemWalker:
         Uses an ignore-list approach - all directories are scanned EXCEPT those
         explicitly listed in IGNORED_DIRECTORIES. This ensures comprehensive
         coverage of hidden directories that may contain credentials.
+
+        In full-disk mode, also excludes platform-specific system directories.
+
+        Args:
+            dirs: List of directory names to filter (modified in-place)
+            current_root: Current directory path (for building full paths)
         """
         indices_to_remove = []
 
         for i, dirname in enumerate(dirs):
+            # Check standard ignored directories (by name)
             if dirname in IGNORED_DIRECTORIES:
                 indices_to_remove.append(i)
+                continue
+
+            # Check full-disk exclusions if enabled
+            if self._full_disk_exclusions:
+                # Build full path to check against absolute path exclusions
+                full_path = os.path.join(current_root, dirname)
+
+                # Check if full path matches any exclusion (for absolute paths like /proc)
+                if full_path in self._full_disk_exclusions:
+                    indices_to_remove.append(i)
+                    continue
+
+                # Check if directory name matches any exclusion (for relative names like "Windows")
+                if dirname in self._full_disk_exclusions:
+                    indices_to_remove.append(i)
+                    continue
 
         # Remove in reverse order to preserve indices
         for i in reversed(indices_to_remove):

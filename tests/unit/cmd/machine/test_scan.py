@@ -5,12 +5,14 @@ This command gathers secrets from the local machine without any network calls.
 It's the fastest option for getting an inventory of potential secrets.
 """
 
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from click.testing import CliRunner
 
 from ggshield.__main__ import cli
-from ggshield.verticals.machine.secret_gatherer import GatheringStats
+from ggshield.cmd.machine.common_options import FULL_DISK_DEFAULT_TIMEOUT
+from ggshield.verticals.machine.secret_gatherer import GatheringStats, ScanMode
 from ggshield.verticals.machine.sources import (
     GatheredSecret,
     SecretMetadata,
@@ -435,3 +437,173 @@ class TestMachineScanCommand:
         if call_args:
             config = call_args[0][0]
             assert config.deep_scan is True
+
+    def test_scan_with_path_option(self, cli_fs_runner: CliRunner, tmp_path: Path):
+        """
+        GIVEN a --path option with a valid directory
+        WHEN running machine scan
+        THEN passes scan_mode=PATH and scan_path to gatherer config
+        """
+        mock_gatherer = MagicMock()
+        mock_gatherer.gather.return_value = iter([])
+        mock_gatherer.stats = GatheringStats()
+
+        with patch(
+            "ggshield.cmd.machine.scan.MachineSecretGatherer",
+            return_value=mock_gatherer,
+        ) as mock_class:
+            result = cli_fs_runner.invoke(
+                cli, ["machine", "scan", "--path", str(tmp_path)]
+            )
+
+        assert_invoke_ok(result)
+        call_args = mock_class.call_args
+        config = call_args[0][0]
+        assert config.scan_mode == ScanMode.PATH
+        assert config.scan_path == tmp_path
+
+    def test_scan_with_path_ignores_config_exclusions(
+        self, cli_fs_runner: CliRunner, tmp_path: Path
+    ):
+        """
+        GIVEN a --path option
+        WHEN running machine scan
+        THEN config exclusions are ignored (user is being explicit about what to scan)
+        """
+        mock_gatherer = MagicMock()
+        mock_gatherer.gather.return_value = iter([])
+        mock_gatherer.stats = GatheringStats()
+
+        with patch(
+            "ggshield.cmd.machine.scan.MachineSecretGatherer",
+            return_value=mock_gatherer,
+        ) as mock_class:
+            result = cli_fs_runner.invoke(
+                cli, ["machine", "scan", "--path", str(tmp_path)]
+            )
+
+        assert_invoke_ok(result)
+        call_args = mock_class.call_args
+        config = call_args[0][0]
+        # Without --exclude, and with --path implicitly ignoring config exclusions,
+        # should have no exclusion regexes
+        assert len(config.exclusion_regexes) == 0
+
+    def test_scan_with_full_disk_option(self, cli_fs_runner: CliRunner):
+        """
+        GIVEN --full-disk flag
+        WHEN running machine scan
+        THEN passes scan_mode=FULL_DISK and increases timeout to default
+        """
+        mock_gatherer = MagicMock()
+        mock_gatherer.gather.return_value = iter([])
+        mock_gatherer.stats = GatheringStats()
+
+        with patch(
+            "ggshield.cmd.machine.scan.MachineSecretGatherer",
+            return_value=mock_gatherer,
+        ) as mock_class:
+            result = cli_fs_runner.invoke(cli, ["machine", "scan", "--full-disk"])
+
+        assert_invoke_ok(result)
+        call_args = mock_class.call_args
+        config = call_args[0][0]
+        assert config.scan_mode == ScanMode.FULL_DISK
+        assert config.timeout == FULL_DISK_DEFAULT_TIMEOUT
+
+    def test_scan_path_and_full_disk_mutually_exclusive(
+        self, cli_fs_runner: CliRunner, tmp_path: Path
+    ):
+        """
+        GIVEN both --path and --full-disk options
+        WHEN running machine scan
+        THEN fails with usage error
+        """
+        result = cli_fs_runner.invoke(
+            cli, ["machine", "scan", "--path", str(tmp_path), "--full-disk"]
+        )
+
+        assert result.exit_code != 0
+        assert "mutually exclusive" in result.output.lower()
+
+    def test_scan_full_disk_with_custom_timeout(self, cli_fs_runner: CliRunner):
+        """
+        GIVEN --full-disk with custom --timeout
+        WHEN running machine scan
+        THEN uses custom timeout instead of default 300s
+        """
+        mock_gatherer = MagicMock()
+        mock_gatherer.gather.return_value = iter([])
+        mock_gatherer.stats = GatheringStats()
+
+        with patch(
+            "ggshield.cmd.machine.scan.MachineSecretGatherer",
+            return_value=mock_gatherer,
+        ) as mock_class:
+            result = cli_fs_runner.invoke(
+                cli, ["machine", "scan", "--full-disk", "--timeout", "120"]
+            )
+
+        assert_invoke_ok(result)
+        call_args = mock_class.call_args
+        config = call_args[0][0]
+        assert config.scan_mode == ScanMode.FULL_DISK
+        assert config.timeout == 120  # User-specified, not 300
+
+    def test_scan_path_shows_progress_message(
+        self, cli_fs_runner: CliRunner, tmp_path: Path
+    ):
+        """
+        GIVEN --path option
+        WHEN running machine scan
+        THEN shows path in progress message
+        """
+        mock_gatherer = MagicMock()
+        mock_gatherer.gather.return_value = iter([])
+        mock_gatherer.stats = GatheringStats()
+
+        with patch(
+            "ggshield.cmd.machine.scan.MachineSecretGatherer",
+            return_value=mock_gatherer,
+        ):
+            result = cli_fs_runner.invoke(
+                cli, ["machine", "scan", "--path", str(tmp_path)]
+            )
+
+        assert_invoke_ok(result)
+        # Should mention scanning the specific path
+        assert f"Scanning {tmp_path}" in result.output
+
+    def test_scan_full_disk_shows_warning(self, cli_fs_runner: CliRunner):
+        """
+        GIVEN --full-disk option
+        WHEN running machine scan
+        THEN shows warning about full disk scan
+        """
+        mock_gatherer = MagicMock()
+        mock_gatherer.gather.return_value = iter([])
+        mock_gatherer.stats = GatheringStats()
+
+        with patch(
+            "ggshield.cmd.machine.scan.MachineSecretGatherer",
+            return_value=mock_gatherer,
+        ):
+            result = cli_fs_runner.invoke(cli, ["machine", "scan", "--full-disk"])
+
+        assert_invoke_ok(result)
+        # Should warn about full disk scan
+        assert "Full disk scan" in result.output
+        assert "300s" in result.output or "Timeout" in result.output
+
+    def test_scan_help_shows_new_options(self, cli_fs_runner: CliRunner):
+        """
+        GIVEN the machine scan command
+        WHEN running with --help
+        THEN displays --path and --full-disk options
+        """
+        result = cli_fs_runner.invoke(cli, ["machine", "scan", "--help"])
+
+        assert_invoke_ok(result)
+        assert "--path" in result.output
+        assert "--full-disk" in result.output
+        assert "Cannot be used with" in result.output  # Mutual exclusivity note

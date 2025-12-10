@@ -9,12 +9,16 @@ from __future__ import annotations
 
 import logging
 import sys
+from pathlib import Path
 from typing import Any, List, Optional, Tuple
 
 import click
 from pygitguardian.models import TokenScope
 
-from ggshield.cmd.machine.common_options import machine_scan_options
+from ggshield.cmd.machine.common_options import (
+    FULL_DISK_DEFAULT_TIMEOUT,
+    machine_scan_options,
+)
 from ggshield.cmd.utils.common_options import (
     add_common_options,
     json_option,
@@ -33,6 +37,7 @@ from ggshield.verticals.machine.output import (
 from ggshield.verticals.machine.secret_gatherer import (
     GatheringConfig,
     MachineSecretGatherer,
+    ScanMode,
     SourceResult,
     SourceStatus,
 )
@@ -172,6 +177,8 @@ def scan_cmd(
     exclude: Tuple[str, ...],
     ignore_config_exclusions: bool,
     deep: bool,
+    path: Optional[Path],
+    full_disk: bool,
     **kwargs: Any,
 ) -> int:
     """
@@ -189,12 +196,26 @@ def scan_cmd(
       - `ggshield machine analyze` - Full analysis with GitGuardian API
 
     \b
-    Sources scanned:
+    Sources scanned (default mode):
       - Environment variables
       - GitHub CLI token (if `gh` is installed)
       - ~/.npmrc configuration
+      - Credential files (AWS, Docker, GCP, etc.)
       - .env* files (recursive scan from home directory)
       - Private key files (SSH, SSL, crypto keys)
+
+    \b
+    With --path:
+      - Scans only the specified directory
+      - Finds .env files and private keys
+      - Skips home-based credential files
+
+    \b
+    With --full-disk:
+      - Scans the entire filesystem
+      - Includes all credential sources
+      - Excludes platform-specific system directories
+      - Auto-increases timeout to 300s
 
     \b
     With --deep flag:
@@ -204,13 +225,31 @@ def scan_cmd(
 
     \b
     Examples:
-      ggshield machine scan              # Fast local inventory
-      ggshield machine scan --deep       # Include API-based deep scan
-      ggshield machine scan --json       # JSON output
-      ggshield machine scan --timeout 30 # Limit scan time
-      ggshield machine scan -v           # Verbose output
+      ggshield machine scan                     # Fast local inventory
+      ggshield machine scan --path /opt/myapp   # Scan specific directory
+      ggshield machine scan --full-disk         # Scan entire filesystem
+      ggshield machine scan --deep              # Include API-based deep scan
+      ggshield machine scan --json              # JSON output
+      ggshield machine scan --timeout 30        # Limit scan time
+      ggshield machine scan -v                  # Verbose output
     """
     ctx_obj = ContextObj.get(ctx)
+
+    # Validate mutually exclusive options
+    if path is not None and full_disk:
+        raise click.UsageError("--path and --full-disk are mutually exclusive.")
+
+    # Determine scan mode and effective timeout
+    if full_disk:
+        scan_mode = ScanMode.FULL_DISK
+        # Auto-increase timeout if user didn't specify one (60 is the default)
+        effective_timeout = timeout if timeout != 60 else FULL_DISK_DEFAULT_TIMEOUT
+    elif path is not None:
+        scan_mode = ScanMode.PATH
+        effective_timeout = timeout
+    else:
+        scan_mode = ScanMode.HOME
+        effective_timeout = timeout
 
     # Show alpha warning (not in JSON mode)
     if not ctx_obj.use_json:
@@ -230,8 +269,9 @@ def scan_cmd(
     # Build exclusion patterns from config and CLI options
     exclusion_patterns: set[str] = set()
 
-    # Add patterns from config unless ignored
-    if not ignore_config_exclusions:
+    # Add patterns from config unless ignored or using --path
+    # (when using --path, user is being explicit about what to scan)
+    if not ignore_config_exclusions and path is None:
         exclusion_patterns.update(ctx_obj.config.user_config.secret.ignored_paths)
 
     # Add patterns from CLI --exclude options
@@ -240,17 +280,28 @@ def scan_cmd(
     # Convert to regex patterns
     exclusion_regexes = init_exclusion_regexes(exclusion_patterns)
 
+    # Show appropriate progress message
     if show_progress:
-        if deep:
+        if full_disk:
+            ui.display_warning(
+                "Full disk scan enabled. This may take a long time and scan sensitive areas. "
+                f"Timeout set to {effective_timeout}s."
+            )
+            ui.display_info("Scanning entire filesystem for secrets...\n")
+        elif path:
+            ui.display_info(f"Scanning {path} for secrets...\n")
+        elif deep:
             ui.display_info("Scanning machine for secrets (deep mode)...\n")
         else:
             ui.display_info("Scanning machine for secrets...\n")
 
     with ScanProgressReporter(enabled=show_progress) as progress:
         config = GatheringConfig(
-            timeout=timeout,
+            timeout=effective_timeout,
             min_chars=min_chars,
             verbose=ui.is_verbose(),
+            scan_mode=scan_mode,
+            scan_path=path,
             on_progress=progress.on_progress,
             on_source_complete=progress.on_source_complete,
             exclusion_regexes=exclusion_regexes,

@@ -4,12 +4,15 @@ Common options for machine commands.
 
 from functools import wraps
 from pathlib import Path
-from typing import Any, Callable, TypeVar
+from typing import Any, Callable, Optional, TypeVar
 
 import click
 
 
 F = TypeVar("F", bound=Callable[..., Any])
+
+# Default timeout for full-disk scans (5 minutes)
+FULL_DISK_DEFAULT_TIMEOUT = 300
 
 
 def machine_scan_options(f: F) -> F:
@@ -52,6 +55,27 @@ def machine_scan_options(f: F) -> F:
         help=(
             "Send files to GitGuardian API for comprehensive scanning with 500+ "
             "secret detectors. Requires a valid API key."
+        ),
+    )
+    @click.option(
+        "--path",
+        type=click.Path(exists=True, file_okay=False, resolve_path=True, path_type=Path),
+        default=None,
+        help=(
+            "Scan a specific directory recursively for .env files and private keys. "
+            "Skips home-based credential files (AWS, Docker, etc.). "
+            "Cannot be used with --full-disk."
+        ),
+    )
+    @click.option(
+        "--full-disk",
+        is_flag=True,
+        default=False,
+        help=(
+            "Scan the entire filesystem for secrets. "
+            f"Auto-increases timeout to {FULL_DISK_DEFAULT_TIMEOUT}s unless --timeout is specified. "
+            "Platform-specific system directories are excluded. "
+            "Cannot be used with --path."
         ),
     )
     @wraps(f)

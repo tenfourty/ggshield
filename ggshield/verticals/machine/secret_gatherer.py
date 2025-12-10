@@ -120,6 +120,14 @@ CREDENTIAL_FILE_SOURCES: List[Type[SecretSource]] = [
 ProgressCallback = Callable[[str, int, float], None]
 
 
+class ScanMode(Enum):
+    """Mode for secret gathering scan."""
+
+    HOME = "home"  # Default: scan user's home directory
+    PATH = "path"  # Scan a specific directory recursively
+    FULL_DISK = "full_disk"  # Scan entire filesystem
+
+
 class SourceStatus(Enum):
     """Status of a source after scanning."""
 
@@ -153,6 +161,9 @@ class GatheringConfig:
     min_chars: int = 5
     verbose: bool = False
     home_dir: Optional[Path] = None  # For testing
+    # Scan mode configuration
+    scan_mode: ScanMode = ScanMode.HOME
+    scan_path: Optional[Path] = None  # For PATH mode
     on_progress: Optional[ProgressCallback] = field(default=None, repr=False)
     on_source_complete: Optional[SourceCompletionCallback] = field(
         default=None, repr=False
@@ -274,6 +285,11 @@ class MachineSecretGatherer:
         Yields secrets as they're discovered. Statistics are
         updated incrementally and available via `stats` property.
 
+        The scan mode determines which sources are scanned:
+        - HOME (default): All sources including credential files and home filesystem
+        - PATH: Only .env files and private keys in the specified directory
+        - FULL_DISK: All sources plus full filesystem scan with platform exclusions
+
         When deep_scan is enabled, also sends candidate files to the
         GitGuardian API for comprehensive scanning. Secrets are deduplicated
         by content hash to ensure dedicated sources take priority.
@@ -285,18 +301,40 @@ class MachineSecretGatherer:
 
         home = self.config.home_dir or Path.home()
 
-        # Fast sources first (special handling required)
-        yield from self._gather_from_environment()
-        yield from self._gather_from_github_cli()
-        yield from self._gather_from_npmrc(home)
+        # Dispatch based on scan mode
+        if self.config.scan_mode == ScanMode.PATH:
+            # PATH mode: Only filesystem scan of specified path
+            # Skip all home-based credential sources
+            if self.config.scan_path and not self._is_timed_out():
+                yield from self._gather_from_filesystem_path(self.config.scan_path)
 
-        # Credential file sources (single-file reads via generic gatherer)
-        for source_cls in CREDENTIAL_FILE_SOURCES:
-            yield from self._gather_from_source(source_cls(home_dir=home))
+        elif self.config.scan_mode == ScanMode.FULL_DISK:
+            # FULL_DISK mode: All sources + full filesystem scan
+            yield from self._gather_from_environment()
+            yield from self._gather_from_github_cli()
+            yield from self._gather_from_npmrc(home)
 
-        # Filesystem sources (single unified traversal, respects timeout)
-        if not self._is_timed_out():
-            yield from self._gather_from_filesystem(home)
+            # Credential file sources (single-file reads via generic gatherer)
+            for source_cls in CREDENTIAL_FILE_SOURCES:
+                yield from self._gather_from_source(source_cls(home_dir=home))
+
+            # Full disk filesystem scan (respects timeout)
+            if not self._is_timed_out():
+                yield from self._gather_from_full_disk(home)
+
+        else:
+            # HOME mode (default): existing behaviour
+            yield from self._gather_from_environment()
+            yield from self._gather_from_github_cli()
+            yield from self._gather_from_npmrc(home)
+
+            # Credential file sources (single-file reads via generic gatherer)
+            for source_cls in CREDENTIAL_FILE_SOURCES:
+                yield from self._gather_from_source(source_cls(home_dir=home))
+
+            # Filesystem sources (single unified traversal, respects timeout)
+            if not self._is_timed_out():
+                yield from self._gather_from_filesystem(home)
 
         # Deep scan phase (API-based comprehensive scanning)
         if self.config.deep_scan and self.config.client and not self._is_timed_out():
@@ -430,6 +468,169 @@ class MachineSecretGatherer:
             walker.stats.matches_by_type,
             walker.stats.secrets_by_type,
         )
+
+    def _gather_from_filesystem_path(self, scan_path: Path) -> Iterator[GatheredSecret]:
+        """
+        Gather secrets from a specific directory path.
+
+        Only scans for .env files and private keys - skips credential file sources.
+        This is used for PATH mode where only a specific directory is scanned.
+
+        Args:
+            scan_path: The directory to scan recursively
+        """
+        # Create matchers for .env and private keys only
+        env_matcher = EnvFileMatcher(min_chars=self.config.min_chars)
+        key_matcher = PrivateKeyMatcher()
+
+        def on_walker_progress(
+            files_visited: int, matches_by_type: Dict[SourceType, int]
+        ) -> None:
+            self._stats.total_files_visited = files_visited
+            self._report_progress_with_counts_for_path(
+                files_visited, matches_by_type, scan_path
+            )
+
+        # Callback for collecting candidate files for deep scan
+        on_candidate = self._add_candidate_file if self.config.deep_scan else None
+
+        walker_config = WalkerConfig(
+            home_dir=scan_path,
+            matchers=[env_matcher, key_matcher],
+            is_timed_out=self._is_timed_out,
+            exclusion_regexes=self.config.exclusion_regexes,
+            on_progress=on_walker_progress,
+            on_candidate_file=on_candidate,
+        )
+
+        walker = UnifiedFileSystemWalker(walker_config)
+
+        # Single filesystem traversal
+        self._report_progress_force(f"Scanning {scan_path}")
+        for secret in walker.walk():
+            self._stats.total_files_visited = walker.stats.files_visited
+            yield secret
+
+        if self._is_timed_out():
+            self._stats.timed_out = True
+
+        # Finalize stats from walker
+        self._finalize_filesystem_stats(
+            walker.stats.files_visited,
+            walker.stats.matches_by_type,
+            walker.stats.secrets_by_type,
+        )
+
+    def _gather_from_full_disk(self, home: Path) -> Iterator[GatheredSecret]:
+        """
+        Gather secrets from the entire filesystem.
+
+        Uses platform-specific root paths and exclusions. Also scans
+        well-known key locations in the home directory first (fast-path).
+
+        Args:
+            home: The user's home directory for well-known locations
+        """
+        from ggshield.verticals.machine.sources.platform_paths import is_windows
+
+        # Track private keys already seen in well-known locations
+        seen_key_paths: Set[Path] = set()
+
+        # Fast-path: scan well-known private key locations first
+        yield from self._scan_well_known_key_locations(home, seen_key_paths)
+
+        if self._is_timed_out():
+            self._finalize_filesystem_stats(0, {}, {})
+            return
+
+        # Determine root paths based on platform
+        if is_windows():
+            # Scan all available drive letters on Windows
+            import string
+
+            root_paths = [
+                Path(f"{drive}:\\")
+                for drive in string.ascii_uppercase
+                if Path(f"{drive}:\\").exists()
+            ]
+        else:
+            # Unix-like systems: scan from root
+            root_paths = [Path("/")]
+
+        # Create matchers
+        env_matcher = EnvFileMatcher(min_chars=self.config.min_chars)
+        key_matcher = PrivateKeyMatcher(seen_paths=seen_key_paths)
+
+        total_files = 0
+        total_matches: Dict[SourceType, int] = {}
+        total_secrets: Dict[SourceType, int] = {}
+
+        for root_path in root_paths:
+            if self._is_timed_out():
+                break
+
+            def on_walker_progress(
+                files_visited: int, matches_by_type: Dict[SourceType, int]
+            ) -> None:
+                self._stats.total_files_visited = total_files + files_visited
+                env_count = matches_by_type.get(SourceType.ENV_FILE, 0)
+                key_count = matches_by_type.get(SourceType.PRIVATE_KEY, 0)
+                phase = (
+                    f"Scanning filesystem ({root_path}) | "
+                    f".env: {env_count} | keys: {key_count}"
+                )
+                elapsed = time.time() - (self._start_time or time.time())
+                if self.config.on_progress:
+                    self.config.on_progress(
+                        phase, total_files + files_visited, elapsed
+                    )
+
+            # Callback for collecting candidate files for deep scan
+            on_candidate = self._add_candidate_file if self.config.deep_scan else None
+
+            walker_config = WalkerConfig(
+                home_dir=root_path,
+                matchers=[env_matcher, key_matcher],
+                is_timed_out=self._is_timed_out,
+                exclusion_regexes=self.config.exclusion_regexes,
+                on_progress=on_walker_progress,
+                on_candidate_file=on_candidate,
+                full_disk_mode=True,  # Enable platform-specific exclusions
+            )
+
+            walker = UnifiedFileSystemWalker(walker_config)
+
+            self._report_progress_force(f"Scanning {root_path}")
+            for secret in walker.walk():
+                yield secret
+
+            total_files += walker.stats.files_visited
+            for st, count in walker.stats.matches_by_type.items():
+                total_matches[st] = total_matches.get(st, 0) + count
+            for st, count in walker.stats.secrets_by_type.items():
+                total_secrets[st] = total_secrets.get(st, 0) + count
+
+        if self._is_timed_out():
+            self._stats.timed_out = True
+
+        # Finalize with combined stats from all root paths
+        self._finalize_filesystem_stats(total_files, total_matches, total_secrets)
+
+    def _report_progress_with_counts_for_path(
+        self,
+        files_visited: int,
+        matches_by_type: Dict[SourceType, int],
+        scan_path: Path,
+    ) -> None:
+        """Report progress with per-type match counts for PATH mode."""
+        if self.config.on_progress is None:
+            return
+
+        elapsed = time.time() - (self._start_time or time.time())
+        env_count = matches_by_type.get(SourceType.ENV_FILE, 0)
+        key_count = matches_by_type.get(SourceType.PRIVATE_KEY, 0)
+        phase = f"Scanning {scan_path} | .env: {env_count} | keys: {key_count}"
+        self.config.on_progress(phase, files_visited, elapsed)
 
     def _scan_well_known_key_locations(
         self, home: Path, seen_paths: Set[Path]

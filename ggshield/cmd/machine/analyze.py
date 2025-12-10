@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Any, Dict, List, Tuple
 import click
 
 from ggshield.cmd.machine.common_options import (
+    FULL_DISK_DEFAULT_TIMEOUT,
     hmsl_options,
     machine_scan_options,
     output_option,
@@ -40,6 +41,7 @@ from ggshield.verticals.machine.output import LeakedSecretInfo, display_analyzed
 from ggshield.verticals.machine.secret_gatherer import (
     GatheringConfig,
     MachineSecretGatherer,
+    ScanMode,
 )
 from ggshield.verticals.machine.sources import GatheredSecret
 
@@ -148,6 +150,8 @@ def analyze_cmd(
     exclude: Tuple[str, ...],
     ignore_config_exclusions: bool,
     deep: bool,
+    path: Path | None,
+    full_disk: bool,
     **kwargs: Any,
 ) -> int:
     """
@@ -196,6 +200,21 @@ def analyze_cmd(
 
     ctx_obj = ContextObj.get(ctx)
 
+    # Validate mutually exclusive options
+    if path is not None and full_disk:
+        raise click.UsageError("--path and --full-disk are mutually exclusive.")
+
+    # Determine scan mode and effective timeout
+    if full_disk:
+        scan_mode = ScanMode.FULL_DISK
+        effective_timeout = timeout if timeout != 60 else FULL_DISK_DEFAULT_TIMEOUT
+    elif path is not None:
+        scan_mode = ScanMode.PATH
+        effective_timeout = timeout
+    else:
+        scan_mode = ScanMode.HOME
+        effective_timeout = timeout
+
     # Show alpha warning (not in JSON mode)
     if not ctx_obj.use_json:
         ui.display_warning(
@@ -211,8 +230,9 @@ def analyze_cmd(
     # Build exclusion patterns from config and CLI options
     exclusion_patterns: set[str] = set()
 
-    # Add patterns from config unless ignored
-    if not ignore_config_exclusions:
+    # Add patterns from config unless ignored or using --path
+    # (when using --path, user is being explicit about what to scan)
+    if not ignore_config_exclusions and path is None:
         exclusion_patterns.update(ctx_obj.config.user_config.secret.ignored_paths)
 
     # Add patterns from CLI --exclude options
@@ -221,8 +241,17 @@ def analyze_cmd(
     # Convert to regex patterns
     exclusion_regexes = init_exclusion_regexes(exclusion_patterns)
 
+    # Show appropriate progress message
     if show_progress:
-        if deep:
+        if full_disk:
+            ui.display_warning(
+                "Full disk scan enabled. This may take a long time and scan sensitive areas. "
+                f"Timeout set to {effective_timeout}s."
+            )
+            ui.display_info("Scanning entire filesystem for secrets...\n")
+        elif path:
+            ui.display_info(f"Scanning {path} for secrets...\n")
+        elif deep:
             ui.display_info("Scanning machine for secrets (deep mode)...\n")
         else:
             ui.display_info("Scanning machine for secrets...\n")
@@ -230,9 +259,11 @@ def analyze_cmd(
     # Gather secrets with progress reporting
     with ScanProgressReporter(enabled=show_progress) as progress:
         config = GatheringConfig(
-            timeout=timeout,
+            timeout=effective_timeout,
             min_chars=min_chars,
             verbose=ui.is_verbose(),
+            scan_mode=scan_mode,
+            scan_path=path,
             on_progress=progress.on_progress,
             on_source_complete=progress.on_source_complete,
             exclusion_regexes=exclusion_regexes,
