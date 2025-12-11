@@ -122,7 +122,9 @@ class ScanProgressReporter:
             for detector, count in sorted_detectors:
                 self._write_line(f"      {detector}: {count}")
 
-    def on_progress(self, phase: str, files_visited: int, elapsed: float) -> None:
+    def on_progress(
+        self, phase: str, files_visited: int, elapsed: float, current_dir: str = ""
+    ) -> None:
         """Update the spinner during filesystem scans."""
         if not self.enabled:
             return
@@ -133,6 +135,14 @@ class ScanProgressReporter:
         spinner = SPINNER_CHARS[self.spinner_index % len(SPINNER_CHARS)]
         self.spinner_index += 1
 
+        # Truncate long paths for display
+        dir_display = ""
+        if current_dir:
+            max_dir_len = 40
+            if len(current_dir) > max_dir_len:
+                current_dir = "..." + current_dir[-(max_dir_len - 3) :]
+            dir_display = f" [{current_dir}]"
+
         # Handle unified phase format "Scanning home directory | .env: N | keys: N"
         if " | " in phase:
             parts = phase.split(" | ")
@@ -140,10 +150,10 @@ class ScanProgressReporter:
             counts = " | ".join(parts[1:])
             msg = (
                 f"\r  {spinner} {base_phase}... "
-                f"{files_visited:,} files ({elapsed:.1f}s) | {counts}"
+                f"{files_visited:,} files ({elapsed:.1f}s) | {counts}{dir_display}"
             )
         else:
-            msg = f"\r  {spinner} {phase}... {files_visited:,} files ({elapsed:.1f}s)"
+            msg = f"\r  {spinner} {phase}... {files_visited:,} files ({elapsed:.1f}s){dir_display}"
 
         self._current_spinner_line = msg
         sys.stderr.write(msg)

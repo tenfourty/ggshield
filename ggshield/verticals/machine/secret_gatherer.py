@@ -116,8 +116,8 @@ CREDENTIAL_FILE_SOURCES: List[Type[SecretSource]] = [
 ]
 
 
-# Type alias for progress callback: (phase, files_visited, elapsed_seconds) -> None
-ProgressCallback = Callable[[str, int, float], None]
+# Type alias for progress callback: (phase, files_visited, elapsed_seconds, current_dir) -> None
+ProgressCallback = Callable[[str, int, float, str], None]
 
 
 class ScanMode(Enum):
@@ -434,10 +434,10 @@ class MachineSecretGatherer:
         key_matcher = PrivateKeyMatcher(seen_paths=seen_key_paths)
 
         def on_walker_progress(
-            files_visited: int, matches_by_type: Dict[SourceType, int]
+            files_visited: int, matches_by_type: Dict[SourceType, int], current_dir: str
         ) -> None:
             self._stats.total_files_visited = files_visited
-            self._report_progress_with_counts(files_visited, matches_by_type)
+            self._report_progress_with_counts(files_visited, matches_by_type, current_dir)
 
         # Callback for collecting candidate files for deep scan
         on_candidate = self._add_candidate_file if self.config.deep_scan else None
@@ -484,11 +484,11 @@ class MachineSecretGatherer:
         key_matcher = PrivateKeyMatcher()
 
         def on_walker_progress(
-            files_visited: int, matches_by_type: Dict[SourceType, int]
+            files_visited: int, matches_by_type: Dict[SourceType, int], current_dir: str
         ) -> None:
             self._stats.total_files_visited = files_visited
             self._report_progress_with_counts_for_path(
-                files_visited, matches_by_type, scan_path
+                files_visited, matches_by_type, scan_path, current_dir
             )
 
         # Callback for collecting candidate files for deep scan
@@ -570,7 +570,7 @@ class MachineSecretGatherer:
                 break
 
             def on_walker_progress(
-                files_visited: int, matches_by_type: Dict[SourceType, int]
+                files_visited: int, matches_by_type: Dict[SourceType, int], current_dir: str
             ) -> None:
                 self._stats.total_files_visited = total_files + files_visited
                 env_count = matches_by_type.get(SourceType.ENV_FILE, 0)
@@ -582,7 +582,7 @@ class MachineSecretGatherer:
                 elapsed = time.time() - (self._start_time or time.time())
                 if self.config.on_progress:
                     self.config.on_progress(
-                        phase, total_files + files_visited, elapsed
+                        phase, total_files + files_visited, elapsed, current_dir
                     )
 
             # Callback for collecting candidate files for deep scan
@@ -621,6 +621,7 @@ class MachineSecretGatherer:
         files_visited: int,
         matches_by_type: Dict[SourceType, int],
         scan_path: Path,
+        current_dir: str = "",
     ) -> None:
         """Report progress with per-type match counts for PATH mode."""
         if self.config.on_progress is None:
@@ -630,7 +631,7 @@ class MachineSecretGatherer:
         env_count = matches_by_type.get(SourceType.ENV_FILE, 0)
         key_count = matches_by_type.get(SourceType.PRIVATE_KEY, 0)
         phase = f"Scanning {scan_path} | .env: {env_count} | keys: {key_count}"
-        self.config.on_progress(phase, files_visited, elapsed)
+        self.config.on_progress(phase, files_visited, elapsed, current_dir)
 
     def _scan_well_known_key_locations(
         self, home: Path, seen_paths: Set[Path]
@@ -746,7 +747,10 @@ class MachineSecretGatherer:
         )
 
     def _report_progress_with_counts(
-        self, files_visited: int, matches_by_type: Dict[SourceType, int]
+        self,
+        files_visited: int,
+        matches_by_type: Dict[SourceType, int],
+        current_dir: str = "",
     ) -> None:
         """Report progress with per-type match counts."""
         if self.config.on_progress is None:
@@ -757,7 +761,7 @@ class MachineSecretGatherer:
         env_count = matches_by_type.get(SourceType.ENV_FILE, 0)
         key_count = matches_by_type.get(SourceType.PRIVATE_KEY, 0)
         phase = f"Scanning home directory | .env: {env_count} | keys: {key_count}"
-        self.config.on_progress(phase, files_visited, elapsed)
+        self.config.on_progress(phase, files_visited, elapsed, current_dir)
 
     def _is_timed_out(self) -> bool:
         """Check if the gathering has exceeded the timeout."""
@@ -767,7 +771,7 @@ class MachineSecretGatherer:
             return False
         return (time.time() - self._start_time) > self.config.timeout
 
-    def _report_progress(self, phase: str) -> None:
+    def _report_progress(self, phase: str, current_dir: str = "") -> None:
         """Report progress if callback is set and enough files have been visited."""
         if self.config.on_progress is None:
             return
@@ -781,15 +785,15 @@ class MachineSecretGatherer:
 
         self._last_progress_files = self._stats.total_files_visited
         elapsed = time.time() - (self._start_time or time.time())
-        self.config.on_progress(phase, self._stats.total_files_visited, elapsed)
+        self.config.on_progress(phase, self._stats.total_files_visited, elapsed, current_dir)
 
-    def _report_progress_force(self, phase: str) -> None:
+    def _report_progress_force(self, phase: str, current_dir: str = "") -> None:
         """Report progress unconditionally (for phase changes)."""
         if self.config.on_progress is None:
             return
 
         elapsed = time.time() - (self._start_time or time.time())
-        self.config.on_progress(phase, self._stats.total_files_visited, elapsed)
+        self.config.on_progress(phase, self._stats.total_files_visited, elapsed, current_dir)
 
     def _report_source_complete(self, result: SourceResult) -> None:
         """Report that a source has completed scanning."""

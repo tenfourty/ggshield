@@ -211,8 +211,8 @@ class WalkerStats:
     secrets_by_type: Dict[SourceType, int] = field(default_factory=dict)
 
 
-# Type for progress callback: (files_visited, matches_by_type) -> None
-WalkerProgressCallback = Callable[[int, Dict[SourceType, int]], None]
+# Type for progress callback: (files_visited, matches_by_type, current_dir) -> None
+WalkerProgressCallback = Callable[[int, Dict[SourceType, int], str], None]
 
 # Type for candidate file callback: (file_path) -> None
 CandidateFileCallback = Callable[[Path], None]
@@ -265,6 +265,7 @@ class UnifiedFileSystemWalker:
         self.config = config
         self._stats = WalkerStats()
         self._last_progress_time = 0.0
+        self._current_root = ""  # Track current directory for progress reporting
 
         # Merge default exclusions with user-provided ones
         self._all_exclusion_regexes: Set[Pattern[str]] = set(config.exclusion_regexes)
@@ -293,6 +294,7 @@ class UnifiedFileSystemWalker:
         """
         for root, dirs, files in os.walk(self.config.home_dir):
             self._stats.files_visited += len(files)
+            self._current_root = root  # Track for progress reporting
 
             # Report progress periodically (time-based throttling)
             self._maybe_report_progress()
@@ -395,6 +397,7 @@ class UnifiedFileSystemWalker:
             self.config.on_progress(
                 self._stats.files_visited,
                 dict(self._stats.matches_by_type),
+                self._current_root,
             )
 
     @property
