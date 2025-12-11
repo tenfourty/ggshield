@@ -132,21 +132,46 @@ def get_default_exclusion_regexes() -> frozenset:
 
 FULL_DISK_EXCLUSIONS_LINUX = frozenset(
     {
-        "/proc",  # Virtual filesystem - kernel/process info
-        "/sys",  # Kernel sysfs - hardware/driver info
+        # Virtual/kernel filesystems
+        "/proc",  # Kernel/process info
+        "/sys",  # Sysfs - hardware/driver info
         "/dev",  # Device files
         "/run",  # Runtime data (PIDs, sockets)
+        # Boot and system
         "/boot",  # Bootloader and kernel images
+        "/lost+found",  # Filesystem recovery
+        # Package managers
         "/snap",  # Snap package mounts
+        # System libraries (no user secrets)
+        "/usr/lib",  # System libraries
+        "/usr/lib64",  # 64-bit libraries
+        "/usr/lib32",  # 32-bit libraries
+        "/usr/share",  # Shared data (docs, icons)
+        "/usr/bin",  # System binaries
+        "/usr/sbin",  # System admin binaries
+        "/usr/include",  # Header files
+        "/usr/src",  # Kernel source
+        "/lib",  # Essential libraries (often symlink)
+        "/lib64",  # 64-bit libraries (often symlink)
+        "/lib32",  # 32-bit libraries (if present)
+        # Variable/temp data
         "/var/cache",  # Package manager caches
         "/var/log",  # System log files
         "/var/tmp",  # Temporary files
-        "/usr/lib",  # System libraries
-        "/usr/share",  # Shared data (docs, icons)
-        "/lib",  # Essential libraries
-        "/lib64",  # 64-bit libraries
-        "/lib32",  # 32-bit libraries (if present)
-        "/lost+found",  # Filesystem recovery
+        "/var/spool",  # Print/mail spools
+        "/var/crash",  # Crash dumps
+        "/tmp",  # Temporary files
+        # Standard mount points (may contain user data but skip by default)
+        "/mnt",  # Temporary mount points
+        "/media",  # Removable media
+        "/srv",  # Site-specific data served by system
+        # Network filesystems (static - dynamic detection is primary)
+        "/afs",  # Andrew File System
+        # Container/VM runtime
+        "/var/lib/docker",  # Docker images/containers
+        "/var/lib/containers",  # Podman containers
+        "/var/lib/lxc",  # LXC containers
+        "/var/lib/libvirt",  # Libvirt VM storage
     }
 )
 
@@ -198,6 +223,55 @@ def get_full_disk_exclusions() -> frozenset:
     return frozenset()
 
 
+# Remote filesystem types to skip by default in full-disk mode
+REMOTE_FS_TYPES = frozenset(
+    {
+        "nfs",
+        "nfs4",  # Network File System
+        "cifs",
+        "smbfs",  # Windows/Samba shares
+        "sshfs",  # SSH filesystem
+        "fuse.sshfs",  # FUSE SSH filesystem
+        "afs",  # Andrew File System
+        "ncpfs",  # NetWare Core Protocol
+        "9p",  # Plan 9 filesystem (common in VMs)
+        "coda",  # Coda distributed filesystem
+        "lustre",  # Lustre HPC filesystem
+        "glusterfs",  # GlusterFS
+        "fuse.glusterfs",  # FUSE GlusterFS
+        "pvfs2",  # Parallel Virtual File System
+        "gpfs",  # IBM Spectrum Scale
+        "beegfs",  # BeeGFS parallel filesystem
+    }
+)
+
+
+def get_remote_mount_points() -> frozenset:
+    """Get mount points of remote/network filesystems on Linux.
+
+    Parses /proc/mounts to find NFS, CIFS, SSHFS, and other remote mounts.
+    Returns empty set on non-Linux or if /proc/mounts is unavailable.
+
+    Returns:
+        Frozenset of mount point paths for remote filesystems.
+    """
+    if not is_linux():
+        return frozenset()
+
+    try:
+        with open("/proc/mounts", "r") as f:
+            remote_mounts = set()
+            for line in f:
+                parts = line.split()
+                if len(parts) >= 3:
+                    mount_point, fs_type = parts[1], parts[2]
+                    if fs_type in REMOTE_FS_TYPES:
+                        remote_mounts.add(mount_point)
+            return frozenset(remote_mounts)
+    except (OSError, IOError):
+        return frozenset()
+
+
 # Progress update interval in seconds
 PROGRESS_INTERVAL_SECONDS = 0.2
 
@@ -246,6 +320,9 @@ class WalkerConfig:
     on_candidate_file: Optional[CandidateFileCallback] = None
     # Enable platform-specific exclusions for full-disk scanning
     full_disk_mode: bool = False
+    # Include remote/network filesystems (NFS, CIFS, etc.) in full-disk scan
+    # By default, remote mounts are skipped to avoid scanning large network storage
+    include_remote_mounts: bool = False
 
 
 class UnifiedFileSystemWalker:
@@ -274,6 +351,14 @@ class UnifiedFileSystemWalker:
         # Cache platform-specific exclusions if in full-disk mode
         self._full_disk_exclusions = (
             get_full_disk_exclusions() if config.full_disk_mode else frozenset()
+        )
+
+        # Cache remote mount points if NOT including them (full-disk mode only)
+        # On non-Linux, this returns empty set (macOS uses /Volumes exclusion instead)
+        self._remote_mounts: frozenset = (
+            frozenset()
+            if config.include_remote_mounts or not config.full_disk_mode
+            else get_remote_mount_points()
         )
 
         # Initialize match counts for each matcher's source type
@@ -353,7 +438,9 @@ class UnifiedFileSystemWalker:
         explicitly listed in IGNORED_DIRECTORIES. This ensures comprehensive
         coverage of hidden directories that may contain credentials.
 
-        In full-disk mode, also excludes platform-specific system directories.
+        In full-disk mode, also excludes:
+        - Platform-specific system directories
+        - Remote/network mounts (NFS, CIFS, etc.) unless include_remote_mounts is set
 
         Args:
             dirs: List of directory names to filter (modified in-place)
@@ -367,11 +454,11 @@ class UnifiedFileSystemWalker:
                 indices_to_remove.append(i)
                 continue
 
+            # Build full path for subsequent checks
+            full_path = os.path.join(current_root, dirname)
+
             # Check full-disk exclusions if enabled
             if self._full_disk_exclusions:
-                # Build full path to check against absolute path exclusions
-                full_path = os.path.join(current_root, dirname)
-
                 # Check if full path matches any exclusion (for absolute paths like /proc)
                 if full_path in self._full_disk_exclusions:
                     indices_to_remove.append(i)
@@ -381,6 +468,11 @@ class UnifiedFileSystemWalker:
                 if dirname in self._full_disk_exclusions:
                     indices_to_remove.append(i)
                     continue
+
+            # Check remote mount exclusions (detected dynamically from /proc/mounts)
+            if self._remote_mounts and full_path in self._remote_mounts:
+                indices_to_remove.append(i)
+                continue
 
         # Remove in reverse order to preserve indices
         for i in reversed(indices_to_remove):

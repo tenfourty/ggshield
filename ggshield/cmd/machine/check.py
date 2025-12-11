@@ -133,6 +133,7 @@ def check_cmd(
     deep: bool,
     path: Path | None,
     full_disk: bool,
+    include_remote_mounts: bool,
     **kwargs: Any,
 ) -> int:
     """
@@ -239,6 +240,7 @@ def check_cmd(
             exclusion_regexes=exclusion_regexes,
             deep_scan=deep,
             client=client,
+            include_remote_mounts=include_remote_mounts,
         )
 
         gatherer = MachineSecretGatherer(config)

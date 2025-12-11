@@ -74,8 +74,20 @@ def machine_scan_options(f: F) -> F:
         help=(
             "Scan the entire filesystem for secrets. "
             f"Auto-increases timeout to {FULL_DISK_DEFAULT_TIMEOUT}s unless --timeout is specified. "
-            "Platform-specific system directories are excluded. "
+            "Excludes system directories and remote mounts (NFS, CIFS, etc.) by default. "
+            "Use --include-remote-mounts to scan network storage. "
+            "Use --path to scan specific locations like /mnt/usb. "
             "Cannot be used with --path."
+        ),
+    )
+    @click.option(
+        "--include-remote-mounts",
+        is_flag=True,
+        default=False,
+        help=(
+            "Include remote/network filesystems (NFS, CIFS, SSHFS, etc.) in full-disk scan. "
+            "By default, remote mounts are skipped to avoid scanning large network storage. "
+            "Only applies with --full-disk."
         ),
     )
     @wraps(f)

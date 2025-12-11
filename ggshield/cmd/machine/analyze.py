@@ -152,6 +152,7 @@ def analyze_cmd(
     deep: bool,
     path: Path | None,
     full_disk: bool,
+    include_remote_mounts: bool,
     **kwargs: Any,
 ) -> int:
     """
@@ -269,6 +270,7 @@ def analyze_cmd(
             exclusion_regexes=exclusion_regexes,
             deep_scan=deep,
             client=client if deep else None,  # Only pass client if deep scan
+            include_remote_mounts=include_remote_mounts,
         )
 
         gatherer = MachineSecretGatherer(config)

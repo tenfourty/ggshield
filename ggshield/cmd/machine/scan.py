@@ -189,6 +189,7 @@ def scan_cmd(
     deep: bool,
     path: Optional[Path],
     full_disk: bool,
+    include_remote_mounts: bool,
     **kwargs: Any,
 ) -> int:
     """
@@ -224,7 +225,9 @@ def scan_cmd(
     With --full-disk:
       - Scans the entire filesystem
       - Includes all credential sources
-      - Excludes platform-specific system directories
+      - Excludes system directories and remote mounts (NFS, CIFS, etc.)
+      - Use --include-remote-mounts to scan network storage
+      - Use --path to scan specific locations like /mnt/usb
       - Auto-increases timeout to 300s
 
     \b
@@ -317,6 +320,7 @@ def scan_cmd(
             exclusion_regexes=exclusion_regexes,
             deep_scan=deep,
             client=client,
+            include_remote_mounts=include_remote_mounts,
         )
 
         gatherer = MachineSecretGatherer(config)

@@ -172,6 +172,9 @@ class GatheringConfig:
     # Deep scan settings (API-based comprehensive scanning)
     deep_scan: bool = False
     client: Optional["GGClient"] = field(default=None, repr=False)
+    # Include remote/network filesystems (NFS, CIFS, etc.) in full-disk scan
+    # By default, remote mounts are skipped to avoid scanning large network storage
+    include_remote_mounts: bool = False
 
 
 @dataclass
@@ -596,6 +599,7 @@ class MachineSecretGatherer:
                 on_progress=on_walker_progress,
                 on_candidate_file=on_candidate,
                 full_disk_mode=True,  # Enable platform-specific exclusions
+                include_remote_mounts=self.config.include_remote_mounts,
             )
 
             walker = UnifiedFileSystemWalker(walker_config)
