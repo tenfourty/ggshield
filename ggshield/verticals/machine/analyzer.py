@@ -50,15 +50,15 @@ class AnalyzedSecret:
         return self.detector_name is not None
 
     @property
-    def gim_hash(self) -> str:
-        """Scrypt hash for GIM inventory (reuses HMSL hash function)."""
+    def gg_hash(self) -> str:
+        """Scrypt hash for GitGuardian inventory (reuses HMSL hash function)."""
         from ggshield.verticals.hmsl.crypto import hash_string
 
         return hash_string(self.gathered_secret.value)
 
     @property
-    def gim_length(self) -> int:
-        """Byte length for GIM inventory."""
+    def gg_length(self) -> int:
+        """Byte length for GitGuardian inventory."""
         return len(self.gathered_secret.value.encode("utf-8"))
 
     def get_display_name(self) -> str:

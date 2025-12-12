@@ -862,13 +862,13 @@ def _build_analysis_json(result: AnalysisResult) -> Dict[str, Any]:
                 "path": metadata.source_path,
                 "name": metadata.secret_name,
             },
-            # GIM-compatible fields (always included for future inventory uploads)
+            # Inventory-compatible fields (for GitGuardian inventory uploads)
             "gim": {
                 "kind": {
                     "type": "string",
                     "raw": {
-                        "hash": secret.gim_hash,
-                        "length": secret.gim_length,
+                        "hash": secret.gg_hash,
+                        "length": secret.gg_length,
                     },
                 },
                 "sub_path": metadata.secret_name,

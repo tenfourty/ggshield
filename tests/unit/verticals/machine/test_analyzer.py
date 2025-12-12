@@ -98,25 +98,25 @@ class TestAnalyzedSecret:
         )
         assert secret.is_detected is False
 
-    def test_gim_hash_returns_64_char_hex(self):
-        """Test gim_hash returns a 64-character hex string (scrypt hash)."""
+    def test_gg_hash_returns_64_char_hex(self):
+        """Test gg_hash returns a 64-character hex string (scrypt hash)."""
         secret = AnalyzedSecret(
             gathered_secret=make_gathered_secret(value="test_secret_value"),
             detector_name="aws_access_key",
         )
-        gim_hash = secret.gim_hash
-        assert len(gim_hash) == 64
+        gg_hash = secret.gg_hash
+        assert len(gg_hash) == 64
         # Verify it's a valid hex string
-        int(gim_hash, 16)
+        int(gg_hash, 16)
 
-    def test_gim_length_returns_byte_length(self):
-        """Test gim_length returns the UTF-8 byte length of the value."""
+    def test_gg_length_returns_byte_length(self):
+        """Test gg_length returns the UTF-8 byte length of the value."""
         # ASCII string - bytes == chars
         secret = AnalyzedSecret(
             gathered_secret=make_gathered_secret(value="hello"),
             detector_name="aws_access_key",
         )
-        assert secret.gim_length == 5
+        assert secret.gg_length == 5
 
         # Unicode string - bytes > chars
         secret_unicode = AnalyzedSecret(
@@ -124,7 +124,7 @@ class TestAnalyzedSecret:
             detector_name="aws_access_key",
         )
         # 'é' is 2 bytes in UTF-8
-        assert secret_unicode.gim_length == 6
+        assert secret_unicode.gg_length == 6
 
 
 class TestAnalysisResult:

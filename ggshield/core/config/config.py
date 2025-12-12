@@ -237,6 +237,23 @@ class Config:
         logger.debug("Using API key for SaaS instance from config")
         return self.api_key
 
+    @property
+    def nhi_api_key(self) -> str:
+        """
+        The API key for NHI (Non-Human Identity) inventory operations.
+        Requires a service account with nhi:send-inventory scope.
+        Falls back to the regular API key if not set.
+        """
+        try:
+            key = os.environ["GITGUARDIAN_NHI_API_KEY"]
+            logger.debug("Using NHI API key from $GITGUARDIAN_NHI_API_KEY")
+        except KeyError:
+            pass
+        else:
+            return key
+        logger.debug("Using regular API key for NHI operations")
+        return self.api_key
+
     # Properties for HasMySecretLeaked
     # We can't rely on the instance selected by the user,
     # as JWT creation is only available in SaaS.
