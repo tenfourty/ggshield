@@ -32,7 +32,13 @@ def is_path_excluded(
     path: Union[str, Path], exclusion_regexes: Set[Pattern[str]]
 ) -> bool:
     path = Path(path)
-    if path.is_dir():
+    try:
+        is_dir = path.is_dir()
+    except (PermissionError, OSError):
+        # If we can't stat the path (e.g., broken symlink to protected directory),
+        # treat it as a file for exclusion matching purposes
+        is_dir = False
+    if is_dir:
         # The directory exclusion regexes have to end with a slash
         # To check if path is excluded, we need to add a trailing slash
         path_string = f"{PurePosixPath(path)}/"
