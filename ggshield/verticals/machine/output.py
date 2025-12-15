@@ -242,7 +242,9 @@ def _group_leaked_by_priority(
     return high, medium, hidden
 
 
-def display_gathering_stats(stats: GatheringStats, json_output: bool = False) -> None:
+def display_gathering_stats(
+    stats: GatheringStats, json_output: bool = False, verbose: bool = False
+) -> None:
     """Display statistics from the gathering process."""
     if json_output:
         return
@@ -287,6 +289,21 @@ def display_gathering_stats(stats: GatheringStats, json_output: bool = False) ->
             "Scan timed out. Some files may not have been scanned. "
             "Use --timeout to increase the limit."
         )
+
+    # Display permission denied warnings
+    if stats.permission_denied_paths:
+        count = len(stats.permission_denied_paths)
+        ui.display_warning(
+            f"Permission denied: {count} {pluralize('path', count)} could not be scanned. "
+            "Run with sudo for full coverage."
+        )
+        if verbose:
+            ui.display_info("  Skipped paths:")
+            for path in stats.permission_denied_paths[:20]:  # Limit to first 20
+                ui.display_info(f"    - {path}")
+            if count > 20:
+                ui.display_info(f"    ... and {count - 20} more")
+
     ui.display_info("")
 
 

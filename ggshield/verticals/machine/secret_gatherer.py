@@ -44,6 +44,7 @@ from ggshield.verticals.machine.sources.environment import EnvironmentSecretSour
 from ggshield.verticals.machine.sources.factory_auth import FactoryAuthSource
 from ggshield.verticals.machine.sources.file_matcher import (
     EnvFileMatcher,
+    GenericCredentialMatcher,
     PrivateKeyMatcher,
     _looks_like_key_content,
 )
@@ -200,6 +201,9 @@ class GatheringStats:
     total_files_visited: int = 0
     elapsed_seconds: float = 0.0
     timed_out: bool = False
+
+    # Paths that couldn't be scanned due to permission errors
+    permission_denied_paths: List[str] = field(default_factory=list)
 
     def increment_secrets(self, source_type: SourceType, count: int = 1) -> None:
         """Increment secret count for a source type."""
@@ -435,6 +439,7 @@ class MachineSecretGatherer:
         # Create matchers for unified walk
         env_matcher = EnvFileMatcher(min_chars=self.config.min_chars)
         key_matcher = PrivateKeyMatcher(seen_paths=seen_key_paths)
+        cred_matcher = GenericCredentialMatcher(min_chars=self.config.min_chars)
 
         def on_walker_progress(
             files_visited: int, matches_by_type: Dict[SourceType, int], current_dir: str
@@ -447,7 +452,7 @@ class MachineSecretGatherer:
 
         walker_config = WalkerConfig(
             home_dir=home,
-            matchers=[env_matcher, key_matcher],
+            matchers=[env_matcher, key_matcher, cred_matcher],
             is_timed_out=self._is_timed_out,
             exclusion_regexes=self.config.exclusion_regexes,
             on_progress=on_walker_progress,
@@ -470,6 +475,7 @@ class MachineSecretGatherer:
             walker.stats.files_visited,
             walker.stats.matches_by_type,
             walker.stats.secrets_by_type,
+            walker.stats.permission_denied_paths,
         )
 
     def _gather_from_filesystem_path(self, scan_path: Path) -> Iterator[GatheredSecret]:
@@ -482,9 +488,10 @@ class MachineSecretGatherer:
         Args:
             scan_path: The directory to scan recursively
         """
-        # Create matchers for .env and private keys only
+        # Create matchers for .env, private keys, and generic credentials
         env_matcher = EnvFileMatcher(min_chars=self.config.min_chars)
         key_matcher = PrivateKeyMatcher()
+        cred_matcher = GenericCredentialMatcher(min_chars=self.config.min_chars)
 
         def on_walker_progress(
             files_visited: int, matches_by_type: Dict[SourceType, int], current_dir: str
@@ -499,7 +506,7 @@ class MachineSecretGatherer:
 
         walker_config = WalkerConfig(
             home_dir=scan_path,
-            matchers=[env_matcher, key_matcher],
+            matchers=[env_matcher, key_matcher, cred_matcher],
             is_timed_out=self._is_timed_out,
             exclusion_regexes=self.config.exclusion_regexes,
             on_progress=on_walker_progress,
@@ -522,6 +529,7 @@ class MachineSecretGatherer:
             walker.stats.files_visited,
             walker.stats.matches_by_type,
             walker.stats.secrets_by_type,
+            walker.stats.permission_denied_paths,
         )
 
     def _gather_from_full_disk(self, home: Path) -> Iterator[GatheredSecret]:
@@ -563,10 +571,12 @@ class MachineSecretGatherer:
         # Create matchers
         env_matcher = EnvFileMatcher(min_chars=self.config.min_chars)
         key_matcher = PrivateKeyMatcher(seen_paths=seen_key_paths)
+        cred_matcher = GenericCredentialMatcher(min_chars=self.config.min_chars)
 
         total_files = 0
         total_matches: Dict[SourceType, int] = {}
         total_secrets: Dict[SourceType, int] = {}
+        total_permission_denied: List[str] = []
 
         for root_path in root_paths:
             if self._is_timed_out():
@@ -593,7 +603,7 @@ class MachineSecretGatherer:
 
             walker_config = WalkerConfig(
                 home_dir=root_path,
-                matchers=[env_matcher, key_matcher],
+                matchers=[env_matcher, key_matcher, cred_matcher],
                 is_timed_out=self._is_timed_out,
                 exclusion_regexes=self.config.exclusion_regexes,
                 on_progress=on_walker_progress,
@@ -613,12 +623,15 @@ class MachineSecretGatherer:
                 total_matches[st] = total_matches.get(st, 0) + count
             for st, count in walker.stats.secrets_by_type.items():
                 total_secrets[st] = total_secrets.get(st, 0) + count
+            total_permission_denied.extend(walker.stats.permission_denied_paths)
 
         if self._is_timed_out():
             self._stats.timed_out = True
 
         # Finalize with combined stats from all root paths
-        self._finalize_filesystem_stats(total_files, total_matches, total_secrets)
+        self._finalize_filesystem_stats(
+            total_files, total_matches, total_secrets, total_permission_denied
+        )
 
     def _report_progress_with_counts_for_path(
         self,
@@ -714,6 +727,7 @@ class MachineSecretGatherer:
         files_visited: int,
         matches_by_type: Dict[SourceType, int],
         secrets_by_type: Dict[SourceType, int],
+        permission_denied_paths: Optional[List[str]] = None,
     ) -> None:
         """Update stats and report completion for filesystem sources."""
         self._stats.total_files_visited = files_visited
@@ -729,6 +743,10 @@ class MachineSecretGatherer:
         key_secrets_from_walker = secrets_by_type.get(SourceType.PRIVATE_KEY, 0)
         self._stats.increment_files(SourceType.PRIVATE_KEY, key_files_from_walker)
         self._stats.increment_secrets(SourceType.PRIVATE_KEY, key_secrets_from_walker)
+
+        # Add permission denied paths
+        if permission_denied_paths:
+            self._stats.permission_denied_paths.extend(permission_denied_paths)
 
         # Report env files completion
         self._report_source_complete(

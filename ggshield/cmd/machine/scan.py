@@ -159,7 +159,7 @@ class ScanProgressReporter:
         sys.stderr.write(msg)
         sys.stderr.flush()
 
-    def show_summary(self, stats: Any) -> None:
+    def show_summary(self, stats: Any, verbose: bool = False) -> None:
         """Show final summary line."""
         if not self.enabled:
             return
@@ -172,6 +172,20 @@ class ScanProgressReporter:
                 f"  Total: {stats.total_files_visited:,} files visited "
                 f"({stats.elapsed_seconds:.1f}s)"
             )
+
+        # Show permission denied warning
+        if hasattr(stats, "permission_denied_paths") and stats.permission_denied_paths:
+            count = len(stats.permission_denied_paths)
+            self._write_line(
+                f"  ⚠ Permission denied: {count} path(s) could not be scanned. "
+                "Run with sudo for full coverage."
+            )
+            if verbose:
+                # Show first few paths in verbose mode
+                for path in stats.permission_denied_paths[:10]:
+                    self._write_line(f"      - {path}")
+                if count > 10:
+                    self._write_line(f"      ... and {count - 10} more")
 
 
 @click.command()
@@ -327,7 +341,7 @@ def scan_cmd(
         secrets: List[GatheredSecret] = list(gatherer.gather())
 
         # Show summary after all sources complete
-        progress.show_summary(gatherer.stats)
+        progress.show_summary(gatherer.stats, verbose=ui.is_verbose())
 
     # Show timeout warning via ui module (appears in stdout for tests/non-TTY)
     if gatherer.stats.timed_out:

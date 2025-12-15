@@ -283,6 +283,8 @@ class WalkerStats:
     files_visited: int = 0
     matches_by_type: Dict[SourceType, int] = field(default_factory=dict)
     secrets_by_type: Dict[SourceType, int] = field(default_factory=dict)
+    # Paths that couldn't be accessed due to permission errors
+    permission_denied_paths: List[str] = field(default_factory=list)
 
 
 # Type for progress callback: (files_visited, matches_by_type, current_dir) -> None
@@ -290,6 +292,9 @@ WalkerProgressCallback = Callable[[int, Dict[SourceType, int], str], None]
 
 # Type for candidate file callback: (file_path) -> None
 CandidateFileCallback = Callable[[Path], None]
+
+# Type for permission denied callback: (file_path) -> None
+PermissionDeniedCallback = Callable[[str], None]
 
 # File extensions that are candidates for deep scan (text-based config files)
 DEEP_SCAN_EXTENSIONS = frozenset(
@@ -377,7 +382,15 @@ class UnifiedFileSystemWalker:
         Yields:
             GatheredSecret instances from all matched files
         """
-        for root, dirs, files in os.walk(self.config.home_dir):
+
+        def on_walk_error(error: OSError) -> None:
+            """Handle permission errors during directory traversal."""
+            if isinstance(error, PermissionError):
+                self._stats.permission_denied_paths.append(error.filename or str(error))
+
+        for root, dirs, files in os.walk(
+            self.config.home_dir, onerror=on_walk_error
+        ):
             self._stats.files_visited += len(files)
             self._current_root = root  # Track for progress reporting
 

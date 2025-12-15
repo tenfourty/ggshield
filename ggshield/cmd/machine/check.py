@@ -247,7 +247,7 @@ def check_cmd(
         secrets: List[GatheredSecret] = list(gatherer.gather())
 
         # Show summary after all sources complete
-        progress.show_summary(gatherer.stats)
+        progress.show_summary(gatherer.stats, verbose=ui.is_verbose())
 
     # Show timeout warning
     if gatherer.stats.timed_out:

@@ -558,3 +558,214 @@ def _remove_quotes(value: str) -> str:
 def _looks_like_key_content(content: str) -> bool:
     """Check if content contains a private key (not just a public certificate)."""
     return any(marker in content for marker in _PRIVATE_KEY_MARKERS)
+
+
+# Generic credential file names (exact matches, case-insensitive)
+# These are common names for files that store authentication tokens/secrets
+_GENERIC_CREDENTIAL_FILENAMES = frozenset(
+    {
+        # Session/auth tokens
+        "session",
+        "token",
+        "tokens",
+        "auth_token",
+        "access_token",
+        "refresh_token",
+        "bearer_token",
+        # API keys
+        "api_key",
+        "apikey",
+        "api-key",
+        # Credentials
+        "credentials",
+        "creds",
+        "secret",
+        "secrets",
+        # Encryption keys (non-PEM format)
+        "key",
+        "master_key",
+        "encryption_key",
+        # OAuth
+        "oauth",
+        "oauth_token",
+        # Generic auth
+        "auth.json",
+        "auth.yaml",
+        "auth.yml",
+        "credentials.json",
+        "credentials.yaml",
+        "credentials.yml",
+        "secrets.json",
+        "secrets.yaml",
+        "secrets.yml",
+    }
+)
+
+# Directories where generic credential files are commonly found
+_GENERIC_CREDENTIAL_DIRECTORIES = frozenset(
+    {
+        ".local/share",  # XDG data directory (atuin, etc.)
+        ".config",  # XDG config directory
+        ".cache",  # Sometimes has tokens
+    }
+)
+
+# Directories to exclude from generic credential scanning (too many false positives)
+_GENERIC_CREDENTIAL_EXCLUDED_DIRS = frozenset(
+    {
+        "/containers/storage/",  # Container overlays have system files
+        "/docker/",  # Docker storage
+        "/buildx_buildkit",  # Buildkit cache
+        "/overlay/",  # Container overlay filesystems
+        "/snapshots/",  # Container snapshots
+    }
+)
+
+# Maximum file size for generic credential files (64KB - most tokens are small)
+_MAX_CREDENTIAL_FILE_SIZE = 64 * 1024
+
+# Minimum content length to consider (avoid empty or trivial files)
+_MIN_CREDENTIAL_LENGTH = 10
+
+
+def _looks_like_credential_content(content: str) -> bool:
+    """
+    Check if content looks like it could be a credential/token.
+
+    Simple heuristics:
+    - Not empty
+    - Not obviously a config/text file (no common config markers)
+    - Contains alphanumeric content (tokens are usually base64/hex)
+    """
+    content = content.strip()
+
+    # Too short
+    if len(content) < _MIN_CREDENTIAL_LENGTH:
+        return False
+
+    # Skip if it looks like a config file or script
+    config_markers = (
+        "<?xml",
+        "<!DOCTYPE",
+        "<html",
+        "#!/",
+        "[",  # INI section
+        "{",  # JSON (might be credentials.json, handle separately)
+        "#",  # Comments
+    )
+    first_char = content[0] if content else ""
+    if first_char in ("[", "#", "<", "!"):
+        # Allow JSON files - they might contain tokens
+        if not first_char == "{":
+            return False
+
+    # If it's mostly alphanumeric/base64 chars, it's likely a token
+    # Allow common token characters: alphanumeric, +, /, =, -, _
+    token_chars = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789+/=-_.")
+    content_chars = set(content.replace("\n", "").replace("\r", ""))
+
+    # If >80% of unique chars are token-like, consider it a credential
+    if len(content_chars) > 0:
+        token_ratio = len(content_chars & token_chars) / len(content_chars)
+        if token_ratio > 0.8:
+            return True
+
+    return False
+
+
+@dataclass
+class GenericCredentialMatcher:
+    """
+    Matcher for generic credential/token files.
+
+    Identifies files that commonly store authentication tokens, API keys,
+    or session credentials based on filename patterns. This catches
+    credentials from tools that don't have specific matchers (e.g., atuin,
+    various CLI tools that store tokens in ~/.local/share/).
+    """
+
+    min_chars: int = 10
+
+    # Paths already processed
+    seen_paths: Set[Path] = field(default_factory=set)
+
+    # Directories we want to scan for credential files
+    ALLOWED_DOT_DIRECTORIES: Set[str] = field(
+        default_factory=lambda: {".local", ".config", ".cache"}
+    )
+
+    @property
+    def source_type(self) -> SourceType:
+        return SourceType.GENERIC_CREDENTIAL
+
+    @property
+    def allowed_dot_directories(self) -> Set[str]:
+        return self.ALLOWED_DOT_DIRECTORIES
+
+    def matches_filename(self, filename: str) -> bool:
+        """
+        Check if filename looks like a credential file.
+
+        PERF: String operations only - no Path creation.
+        """
+        lower = filename.lower()
+        return lower in _GENERIC_CREDENTIAL_FILENAMES
+
+    def extract_secrets(
+        self,
+        file_path: Path,
+        exclusion_regexes: Set[Pattern[str]],
+    ) -> Iterator[GatheredSecret]:
+        """Extract credential content from a file."""
+        # Skip if already processed
+        if file_path in self.seen_paths:
+            return
+
+        # Check exclusion patterns
+        if is_path_excluded(file_path, exclusion_regexes):
+            return
+
+        # Only scan files in expected locations to reduce false positives
+        path_str = str(file_path)
+        in_credential_location = any(
+            f"/{d}/" in path_str for d in _GENERIC_CREDENTIAL_DIRECTORIES
+        )
+        if not in_credential_location:
+            return
+
+        # Skip container/overlay directories (too many system file false positives)
+        if any(excl in path_str for excl in _GENERIC_CREDENTIAL_EXCLUDED_DIRS):
+            return
+
+        try:
+            # Check file size first
+            stat = file_path.stat()
+            if stat.st_size > _MAX_CREDENTIAL_FILE_SIZE:
+                return
+            if stat.st_size < _MIN_CREDENTIAL_LENGTH:
+                return
+
+            content = file_path.read_text(encoding="utf-8", errors="ignore")
+        except (OSError, PermissionError):
+            return
+
+        # Skip empty files
+        content = content.strip()
+        if not content:
+            return
+
+        # Validate content looks like a credential
+        if not _looks_like_credential_content(content):
+            return
+
+        # Mark as seen to avoid duplicates
+        self.seen_paths.add(file_path)
+
+        yield GatheredSecret(
+            value=content,
+            metadata=SecretMetadata(
+                source_type=self.source_type,
+                source_path=str(file_path),
+                secret_name=file_path.name,
+            ),
+        )
